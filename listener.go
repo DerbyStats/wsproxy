@@ -31,16 +31,17 @@ type UpdateListener interface {
 // A WSListener represents a connection to a Scoreboard,
 // which listens to WS updates and forwards them on.
 type WSListener struct {
-	url       string
 	cookieJar http.CookieJar // TODO: Presist to disk.
 	dialer    *websocket.Dialer
 
 	mu        sync.Mutex
 	state     map[string]interface{} // The current state.
 	listeners map[UpdateListener]struct{}
+
+	loopMu sync.Mutex // Only allow one client loop at a time.
 }
 
-func newWSListener(url string) (*WSListener, error) {
+func newWSListener() (*WSListener, error) {
 	jar, err := cookiejar.New(nil)
 	if err != nil {
 		return nil, err
@@ -52,7 +53,6 @@ func newWSListener(url string) (*WSListener, error) {
 	}
 
 	return &WSListener{
-		url:       url,
 		cookieJar: jar,
 		dialer:    dialer,
 		state:     map[string]interface{}{},
@@ -60,32 +60,49 @@ func newWSListener(url string) (*WSListener, error) {
 	}, nil
 }
 
-func (wsl *WSListener) Run() {
+// Run keeps a WS connection open to the given URL.
+func (wsl *WSListener) Run(url string) {
 	for {
-		err := wsl.clientLoop()
+		headers := http.Header{}
+		headers.Add("User-Agent", "DerbyStats WS Proxy") // TODO: Version.
+		c, _, err := wsl.dialer.DialContext(context.TODO(), url, headers)
+		if err != nil {
+			log.Println("Connect:", err)
+			// Back off a bit.
+			time.Sleep(time.Second * 5)
+			continue
+		}
+		err = wsl.clientLoop(c)
 		if err != nil {
 			log.Println("Listener loop:", err)
 		}
+		c.Close()
 		// Back off a bit.
 		time.Sleep(time.Second * 5)
 	}
 }
 
-func (wsl *WSListener) clientLoop() error {
-	headers := http.Header{}
-	headers.Add("User-Agent", "DerbyStats WS Proxy") // TODO: Version.
-	c, _, err := wsl.dialer.DialContext(context.TODO(), wsl.url, headers)
+// Receive uses an inbound WS connection. This is an alternative to Run.
+func (wsl *WSListener) Receive(w http.ResponseWriter, r *http.Request) {
+	upgrader := &websocket.Upgrader{}
+	c, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
-		return err
+		log.Println(err)
+		return
 	}
-	defer c.Close()
+	wsl.clientLoop(c)
+	c.Close()
+}
 
+func (wsl *WSListener) clientLoop(c *websocket.Conn) error {
+	wsl.loopMu.Lock()
+	defer wsl.loopMu.Unlock()
 	pingerStopped := make(chan struct{}, 0)
 	stopPinger := make(chan struct{}, 0)
 
 	// Register everything.
 	c.SetWriteDeadline(time.Now().Add(time.Second * 30))
-	err = c.WriteMessage(websocket.TextMessage, []byte(`{"action": "Register", "paths": ["ScoreBoard"]}`))
+	err := c.WriteMessage(websocket.TextMessage, []byte(`{"action": "Register", "paths": ["ScoreBoard"]}`))
 	if err != nil {
 		return err
 	}
@@ -114,8 +131,11 @@ func (wsl *WSListener) clientLoop() error {
 			}
 		}
 	}()
+	defer func() {
+		close(stopPinger)
+	}()
 
-	log.Println("Connected and registered on", wsl.url)
+	log.Println("Connected and registered")
 
 	initial := true
 	for {

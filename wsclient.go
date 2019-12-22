@@ -9,14 +9,19 @@ import (
 	"github.com/gorilla/websocket"
 )
 
-// wsHandler handles an inbound WS connection.
-func wsHandler(w http.ResponseWriter, r *http.Request, wsl *WSListener) {
+// wsHandler handles an inbound HTTP WS connection.
+func wsHTTPHandler(w http.ResponseWriter, r *http.Request, wsl *WSListener) {
 	upgrader := &websocket.Upgrader{}
 	c, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
 		log.Println(err)
 		return
 	}
+	wsHandle(c, wsl)
+}
+
+// wsHandler handles an inbound WS connection.
+func wsHandle(c *websocket.Conn, wsl *WSListener) {
 	pc := &proxyClient{
 		c: c,
 		// Allow a small backlog of updates in case we get behind in sending,
