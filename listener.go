@@ -18,6 +18,11 @@ type wsMessage struct {
 	State map[string]interface{} `json:"state,omitempty"`
 }
 
+type wsCommand struct {
+	Action string   `json:"action,omitempty"`
+	Paths  []string `json:"paths,omitempty"`
+}
+
 type UpdateListener interface {
 	// What just changed.
 	Update(update map[string]interface{})
