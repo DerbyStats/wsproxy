@@ -14,6 +14,7 @@ import (
 	"github.com/victorspringer/http-cache/adapter/memory"
 	"gopkg.in/ini.v1"
 
+	"github.com/DerbyStats/wsproxy/proxy"
 	"github.com/DerbyStats/wsproxy/pkg/keyfilter"
 )
 
@@ -73,7 +74,7 @@ func (sp staticProxy) proxy(w http.ResponseWriter, r *http.Request) {
 	io.Copy(w, resp.Body)
 }
 
-func pushLoop(hostAddr string, wsl *WSListener, d *wsDialer) {
+func pushLoop(hostAddr string, wsl *proxy.WSListener, d *proxy.WSDialer) {
 	for {
 		c, err := d.Dial(context.TODO(), "ws://"+hostAddr+"/receiver")
 		if err != nil {
@@ -83,7 +84,7 @@ func pushLoop(hostAddr string, wsl *WSListener, d *wsDialer) {
 			continue
 		}
 		log.Println("Push connected to", hostAddr)
-		wsHandle(c, wsl)
+		proxy.WSHandle(c, wsl)
 		time.Sleep(time.Second * 5)
 	}
 }
@@ -105,12 +106,12 @@ func main() {
 		log.Fatal("keyFilter", err)
 	}
 
-	wsl, err := newWSListener(keyFilter)
+	wsl, err := proxy.NewWSListener(keyFilter)
 	if err != nil {
 		log.Fatal("newWSListener", err)
 	}
 
-	wsd, err := newWSDialer()
+	wsd, err := proxy.NewWSDialer()
 	if err != nil {
 		log.Fatal("newWSDialer", err)
 	}
@@ -160,8 +161,8 @@ func main() {
 	}
 
 	// Serve up WS.
-	http.HandleFunc("/WS/", func(w http.ResponseWriter, r *http.Request) { wsHTTPHandler(w, r, wsl) })
-	http.HandleFunc("/WS", func(w http.ResponseWriter, r *http.Request) { wsHTTPHandler(w, r, wsl) })
+	http.HandleFunc("/WS/", func(w http.ResponseWriter, r *http.Request) { proxy.WSHTTPHandler(w, r, wsl) })
+	http.HandleFunc("/WS", func(w http.ResponseWriter, r *http.Request) { proxy.WSHTTPHandler(w, r, wsl) })
 
 	// Pushing to another proxy.
 	pushAddr := cfg.Section("").Key("push_address").String()

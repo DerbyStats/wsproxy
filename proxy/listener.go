@@ -1,4 +1,4 @@
-package main
+package proxy
 
 import (
 	"context"
@@ -41,7 +41,7 @@ type WSListener struct {
 	loopMu sync.Mutex // Only allow one client loop at a time.
 }
 
-func newWSListener(kf *keyfilter.KeyFilter) (*WSListener, error) {
+func NewWSListener(kf *keyfilter.KeyFilter) (*WSListener, error) {
 	return &WSListener{
 		kf:        kf,
 		state:     map[string]interface{}{},
@@ -50,7 +50,7 @@ func newWSListener(kf *keyfilter.KeyFilter) (*WSListener, error) {
 }
 
 // Run keeps a WS connection open to the given URL.
-func (wsl *WSListener) Run(url string, dialer *wsDialer) {
+func (wsl *WSListener) Run(url string, dialer *WSDialer) {
 	for {
 		c, err := dialer.Dial(context.TODO(), url)
 		if err != nil {
@@ -221,12 +221,12 @@ func (wsl *WSListener) RemoveListener(l UpdateListener) {
 	delete(wsl.listeners, l)
 }
 
-type wsDialer struct {
+type WSDialer struct {
 	dialer    *websocket.Dialer
 	cookieJar *cookiejar.Jar
 }
 
-func newWSDialer() (*wsDialer, error) {
+func NewWSDialer() (*WSDialer, error) {
 	jar, err := cookiejar.New(&cookiejar.Options{
 		Filename: ".cookies",
 	})
@@ -234,7 +234,7 @@ func newWSDialer() (*wsDialer, error) {
 		return nil, err
 	}
 
-	return &wsDialer{
+	return &WSDialer{
 		cookieJar: jar,
 		dialer: &websocket.Dialer{
 			HandshakeTimeout: 30 * time.Second,
@@ -243,7 +243,7 @@ func newWSDialer() (*wsDialer, error) {
 	}, nil
 }
 
-func (d *wsDialer) Dial(context context.Context, url string) (*websocket.Conn, error) {
+func (d *WSDialer) Dial(context context.Context, url string) (*websocket.Conn, error) {
 	headers := http.Header{}
 	headers.Add("User-Agent", "DerbyStats WS Proxy") // TODO: Version.
 	c, _, err := d.dialer.DialContext(context, url, headers)

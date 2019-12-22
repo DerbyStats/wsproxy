@@ -1,4 +1,4 @@
-package main
+package proxy
 
 import (
 	"errors"
@@ -13,18 +13,18 @@ import (
 )
 
 // wsHandler handles an inbound HTTP WS connection.
-func wsHTTPHandler(w http.ResponseWriter, r *http.Request, wsl *WSListener) {
+func WSHTTPHandler(w http.ResponseWriter, r *http.Request, wsl *WSListener) {
 	upgrader := &websocket.Upgrader{}
 	c, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
 		log.Println(err)
 		return
 	}
-	wsHandle(c, wsl)
+	WSHandle(c, wsl)
 }
 
 // wsHandler handles an inbound WS connection.
-func wsHandle(c *websocket.Conn, wsl *WSListener) {
+func WSHandle(c *websocket.Conn, wsl *WSListener) {
 	pc := &proxyClient{
 		c: c,
 		// Allow a small backlog of updates in case we get behind in sending,
