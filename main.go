@@ -49,10 +49,20 @@ func (sp staticProxy) proxy(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Error creating request", http.StatusInternalServerError)
 		return
 	}
-	for k, v := range resp.Header {
-		if k != "Set-Cookie" {
-			w.Header()[k] = v
+	for k := range resp.Header {
+		if k == "Set-Cookie" {
+			continue
 		}
+		v := resp.Header.Get(k)
+		if k == "Location" {
+			// Ensure redirects don't include the host.
+			if u, err := url.Parse(v); err == nil {
+				u.Host = ""
+				u.Scheme = ""
+				v = u.String()
+			}
+		}
+		w.Header().Set(k, v)
 	}
 	w.WriteHeader(resp.StatusCode)
 	if resp.StatusCode/100 == 4 || resp.StatusCode/100 == 5 {
