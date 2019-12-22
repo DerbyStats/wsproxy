@@ -90,6 +90,7 @@ func (wsl *WSListener) Receive(w http.ResponseWriter, r *http.Request) {
 		log.Println(err)
 		return
 	}
+	log.Println("Received a WS push connection")
 	wsl.clientLoop(c)
 	c.Close()
 }

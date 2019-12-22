@@ -2,19 +2,24 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"log"
 	"net/http"
 	"net/url"
+	"os"
 	"time"
 
 	"github.com/victorspringer/http-cache"
 	"github.com/victorspringer/http-cache/adapter/memory"
+	"gopkg.in/ini.v1"
 )
 
-var hostAddr = "localhost:8000"
+type staticProxy struct {
+	addr string
+}
 
-func proxyStatic(w http.ResponseWriter, r *http.Request) {
+func (sp staticProxy) proxy(w http.ResponseWriter, r *http.Request) {
 	if r.Method != "GET" {
 		http.Error(w, "Only GET allowed", http.StatusMethodNotAllowed)
 		return
@@ -23,7 +28,7 @@ func proxyStatic(w http.ResponseWriter, r *http.Request) {
 	// scoreboard, so strip the request down to the minium for caching.
 	u := url.URL{
 		Scheme: "http",
-		Host:   hostAddr,
+		Host:   sp.addr,
 		Path:   r.URL.EscapedPath(),
 	}
 	request, err := http.NewRequestWithContext(r.Context(), "GET", u.String(), nil)
@@ -62,7 +67,7 @@ func pushLoop(hostAddr string, wsl *WSListener) {
 		headers.Add("User-Agent", "DerbyStats WS Proxy") // TODO: Version.
 		c, _, err := wsl.dialer.DialContext(context.TODO(), "ws://"+hostAddr+"/receiver", headers)
 		if err != nil {
-			log.Println("Push connect:", err)
+			log.Println("Push connect error:", err)
 			// Back off a bit.
 			time.Sleep(time.Second * 5)
 			continue
@@ -74,38 +79,77 @@ func pushLoop(hostAddr string, wsl *WSListener) {
 }
 
 func main() {
+	f := "config.ini"
+	// First argument can be an alternate config file.
+	if len(os.Args) >= 2 {
+		f = os.Args[1]
+	}
+	cfg, err := ini.Load(f)
+	if err != nil {
+		log.Fatalf("Failed to read config file %q: %v", f, err)
+	}
+	listenAddr := cfg.Section("").Key("listen_address").String()
+
 	wsl, err := newWSListener()
 	if err != nil {
 		log.Fatal("newWSListener", err)
 	}
 
-	// Option 1: Connect out to a scoreboard.
-	//  go wsl.Run("ws://" + hostAddr + "/WS")
+	scoreboardAddr := cfg.Section("").Key("scoreboard_address").String()
+	if scoreboardAddr != "" {
+		log.Println("Will get updates from", scoreboardAddr)
+		// Option 1: Connect out to a scoreboard.
+		go wsl.Run("ws://" + scoreboardAddr + "/WS")
 
-	// Option 2: Wait for the connection to come to us.
-	http.HandleFunc("/receiver", wsl.Receive)
+	} else {
+		log.Println("No scoreboard_address, waiting for something to push to us.")
+		// Option 2: Wait for the connection to come to us.
+		http.HandleFunc("/receiver", wsl.Receive)
+	}
+
+	// Static content.
+	htmlDir := cfg.Section("").Key("html_directory").String()
+	if scoreboardAddr != "" && htmlDir == "" {
+		log.Println("Proxying static content from", scoreboardAddr)
+		// Serve up static content, which only makes sense if we can talk to the scoreboard.
+		memory, err := memory.NewAdapter(
+			memory.AdapterWithAlgorithm(memory.LRU),
+			memory.AdapterWithCapacity(10000), // Number of cache entries.
+		)
+		if err != nil {
+			log.Fatal("memory cache", err)
+		}
+		cacheClient, err := cache.NewClient(
+			cache.ClientWithAdapter(memory),
+			cache.ClientWithTTL(1*time.Minute),
+		)
+		if err != nil {
+			log.Fatal("cache client", err)
+		}
+
+		sp := staticProxy{addr: scoreboardAddr}
+		http.Handle("/", cacheClient.Middleware(http.HandlerFunc(sp.proxy)))
+	} else if htmlDir != "" {
+		log.Println("Serving static content from", htmlDir)
+		http.Handle("/", http.FileServer(http.Dir(htmlDir)))
+	} else {
+		log.Println("No scoreboard_address or html_directory provided, so no static content will be served.")
+		http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+			fmt.Fprintf(w, "No scoreboard_address or html_directory provided.")
+		})
+	}
 
 	// Serve up WS.
 	http.HandleFunc("/WS/", func(w http.ResponseWriter, r *http.Request) { wsHTTPHandler(w, r, wsl) })
+	http.HandleFunc("/WS", func(w http.ResponseWriter, r *http.Request) { wsHTTPHandler(w, r, wsl) })
 
-	// go pushLoop("localhost:8001", wsl)
-
-	// Serve up static content.
-	memory, err := memory.NewAdapter(
-		memory.AdapterWithAlgorithm(memory.LRU),
-		memory.AdapterWithCapacity(10000), // Number of cache entries.
-	)
-	if err != nil {
-		log.Fatal("memory cache", err)
-	}
-	cacheClient, err := cache.NewClient(
-		cache.ClientWithAdapter(memory),
-		cache.ClientWithTTL(1*time.Minute),
-	)
-	if err != nil {
-		log.Fatal("cache client", err)
+	// Pushing to another proxy.
+	pushAddr := cfg.Section("").Key("push_address").String()
+	if pushAddr != "" {
+		log.Println("Pushing to", pushAddr, "configured.")
+		go pushLoop(pushAddr, wsl)
 	}
 
-	http.Handle("/", cacheClient.Middleware(http.HandlerFunc(proxyStatic)))
-	log.Fatal(http.ListenAndServe(":8001", nil))
+	log.Println("Listening on", listenAddr)
+	log.Fatal(http.ListenAndServe(listenAddr, nil))
 }
