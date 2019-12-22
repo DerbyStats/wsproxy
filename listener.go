@@ -170,6 +170,7 @@ func (wsl *WSListener) clientLoop(c *websocket.Conn) error {
 					}
 				}
 				wsl.state = filtered
+				filtered = withRemoved // Want to send in the full lot.
 				initial = false
 			} else {
 				for k, v := range filtered {
@@ -181,6 +182,7 @@ func (wsl *WSListener) clientLoop(c *websocket.Conn) error {
 				}
 			}
 			if len(filtered) > 0 {
+				// Use a copy to avoid data races.
 				stateCopy := make(map[string]interface{}, len(wsl.state))
 				for k, v := range wsl.state {
 					stateCopy[k] = v
@@ -204,7 +206,11 @@ func (wsl *WSListener) AddListener(l UpdateListener) {
 	defer wsl.mu.Unlock()
 
 	wsl.listeners[l] = struct{}{}
-	l.Update(wsl.state, wsl.state)
+	stateCopy := make(map[string]interface{}, len(wsl.state))
+	for k, v := range wsl.state {
+		stateCopy[k] = v
+	}
+	l.Update(stateCopy, stateCopy)
 }
 
 // AddListener removes a listener.

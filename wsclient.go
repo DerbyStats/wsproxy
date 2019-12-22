@@ -120,11 +120,13 @@ func (pc *proxyClient) sendLoop() {
 			pc.send(&wsMessage{Pong: &msg})
 		case update := <-pc.pendingUpdates:
 			filteredUpdate := map[string]interface{}{}
+			pc.mu.Lock()
 			for k, v := range update {
 				if pc.pt.Covers(k) {
 					filteredUpdate[k] = v
 				}
 			}
+			pc.mu.Unlock()
 			if len(filteredUpdate) > 0 {
 				pc.send(&wsMessage{State: filteredUpdate})
 			}
