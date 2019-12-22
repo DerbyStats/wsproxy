@@ -31,9 +31,6 @@ type UpdateListener interface {
 // A WSListener represents a connection to a Scoreboard,
 // which listens to WS updates and forwards them on.
 type WSListener struct {
-	cookieJar http.CookieJar // TODO: Presist to disk.
-	dialer    *websocket.Dialer
-
 	mu        sync.Mutex
 	state     map[string]interface{} // The current state.
 	listeners map[UpdateListener]struct{}
@@ -42,30 +39,16 @@ type WSListener struct {
 }
 
 func newWSListener() (*WSListener, error) {
-	jar, err := cookiejar.New(nil)
-	if err != nil {
-		return nil, err
-	}
-
-	dialer := &websocket.Dialer{
-		HandshakeTimeout: 30 * time.Second,
-		Jar:              jar,
-	}
-
 	return &WSListener{
-		cookieJar: jar,
-		dialer:    dialer,
 		state:     map[string]interface{}{},
 		listeners: map[UpdateListener]struct{}{},
 	}, nil
 }
 
 // Run keeps a WS connection open to the given URL.
-func (wsl *WSListener) Run(url string) {
+func (wsl *WSListener) Run(url string, dialer *wsDialer) {
 	for {
-		headers := http.Header{}
-		headers.Add("User-Agent", "DerbyStats WS Proxy") // TODO: Version.
-		c, _, err := wsl.dialer.DialContext(context.TODO(), url, headers)
+		c, err := dialer.Dial(context.TODO(), url)
 		if err != nil {
 			log.Println("Connect:", err)
 			// Back off a bit.
@@ -218,4 +201,31 @@ func (wsl *WSListener) RemoveListener(l UpdateListener) {
 	defer wsl.mu.Unlock()
 
 	delete(wsl.listeners, l)
+}
+
+type wsDialer struct {
+	dialer    *websocket.Dialer
+	cookieJar *cookiejar.Jar
+}
+
+func newWSDialer() (*wsDialer, error) {
+	jar, err := cookiejar.New(nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return &wsDialer{
+		cookieJar: jar,
+		dialer: &websocket.Dialer{
+			HandshakeTimeout: 30 * time.Second,
+			Jar:              jar,
+		},
+	}, nil
+}
+
+func (d *wsDialer) Dial(context context.Context, url string) (*websocket.Conn, error) {
+	headers := http.Header{}
+	headers.Add("User-Agent", "DerbyStats WS Proxy") // TODO: Version.
+	c, _, err := d.dialer.DialContext(context, url, headers)
+	return c, err
 }

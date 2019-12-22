@@ -61,11 +61,9 @@ func (sp staticProxy) proxy(w http.ResponseWriter, r *http.Request) {
 	io.Copy(w, resp.Body)
 }
 
-func pushLoop(hostAddr string, wsl *WSListener) {
+func pushLoop(hostAddr string, wsl *WSListener, d *wsDialer) {
 	for {
-		headers := http.Header{}
-		headers.Add("User-Agent", "DerbyStats WS Proxy") // TODO: Version.
-		c, _, err := wsl.dialer.DialContext(context.TODO(), "ws://"+hostAddr+"/receiver", headers)
+		c, err := d.Dial(context.TODO(), "ws://"+hostAddr+"/receiver")
 		if err != nil {
 			log.Println("Push connect error:", err)
 			// Back off a bit.
@@ -95,11 +93,16 @@ func main() {
 		log.Fatal("newWSListener", err)
 	}
 
+	wsd, err := newWSDialer()
+	if err != nil {
+		log.Fatal("newWSDialer", err)
+	}
+
 	scoreboardAddr := cfg.Section("").Key("scoreboard_address").String()
 	if scoreboardAddr != "" {
 		log.Println("Will get updates from", scoreboardAddr)
 		// Option 1: Connect out to a scoreboard.
-		go wsl.Run("ws://" + scoreboardAddr + "/WS")
+		go wsl.Run("ws://"+scoreboardAddr+"/WS", wsd)
 
 	} else {
 		log.Println("No scoreboard_address, waiting for something to push to us.")
@@ -147,7 +150,7 @@ func main() {
 	pushAddr := cfg.Section("").Key("push_address").String()
 	if pushAddr != "" {
 		log.Println("Pushing to", pushAddr, "configured.")
-		go pushLoop(pushAddr, wsl)
+		go pushLoop(pushAddr, wsl, wsd)
 	}
 
 	log.Println("Listening on", listenAddr)
