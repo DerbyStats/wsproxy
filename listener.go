@@ -5,11 +5,11 @@ import (
 	"fmt"
 	"log"
 	"net/http"
-	"net/http/cookiejar"
 	"sync"
 	"time"
 
 	"github.com/gorilla/websocket"
+	"github.com/juju/persistent-cookiejar"
 )
 
 type wsMessage struct {
@@ -209,7 +209,9 @@ type wsDialer struct {
 }
 
 func newWSDialer() (*wsDialer, error) {
-	jar, err := cookiejar.New(nil)
+	jar, err := cookiejar.New(&cookiejar.Options{
+		Filename: ".cookies",
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -227,5 +229,11 @@ func (d *wsDialer) Dial(context context.Context, url string) (*websocket.Conn, e
 	headers := http.Header{}
 	headers.Add("User-Agent", "DerbyStats WS Proxy") // TODO: Version.
 	c, _, err := d.dialer.DialContext(context, url, headers)
-	return c, err
+	if err != nil {
+		return nil, err
+	}
+	if err := d.cookieJar.Save(); err != nil {
+		return nil, err
+	}
+	return c, nil
 }
