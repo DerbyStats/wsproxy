@@ -24,8 +24,8 @@ type wsCommand struct {
 }
 
 type UpdateListener interface {
-	// What just changed.
-	Update(update map[string]interface{})
+	// What just changed and the new full state.
+	Update(update, full map[string]interface{})
 }
 
 // A WSListener represents a connection to a Scoreboard,
@@ -161,7 +161,7 @@ func (wsl *WSListener) clientLoop(c *websocket.Conn) error {
 			wsl.mu.Lock()
 			if _, ok := msg.State["WS.Client.Id"]; !ok && initial {
 				// This is the first proper update from this connection, so have to clear out any
-				// keys that were previously send but are not there now.
+				// keys that were previously sent but are not there any more.
 				withRemoved := map[string]interface{}{}
 				for k, v := range msg.State {
 					if v == nil {
@@ -176,9 +176,6 @@ func (wsl *WSListener) clientLoop(c *websocket.Conn) error {
 						withRemoved[k] = nil
 					}
 				}
-				for l := range wsl.listeners {
-					l.Update(withRemoved)
-				}
 				wsl.state = msg.State
 				initial = false
 			} else {
@@ -189,9 +186,13 @@ func (wsl *WSListener) clientLoop(c *websocket.Conn) error {
 						wsl.state[k] = v
 					}
 				}
-				for l := range wsl.listeners {
-					l.Update(msg.State)
-				}
+			}
+			stateCopy := make(map[string]interface{}, len(wsl.state))
+			for k, v := range wsl.state {
+				stateCopy[k] = v
+			}
+			for l := range wsl.listeners {
+				l.Update(msg.State, stateCopy)
 			}
 			wsl.mu.Unlock()
 		}
@@ -208,7 +209,7 @@ func (wsl *WSListener) AddListener(l UpdateListener) {
 	defer wsl.mu.Unlock()
 
 	wsl.listeners[l] = struct{}{}
-	l.Update(wsl.state)
+	l.Update(wsl.state, wsl.state)
 }
 
 // AddListener removes a listener.

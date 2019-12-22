@@ -4,9 +4,12 @@ import (
 	"errors"
 	"log"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/gorilla/websocket"
+
+	"github.com/DerbyStats/wsproxy/pkg/pathtrie"
 )
 
 // wsHandler handles an inbound HTTP WS connection.
@@ -31,6 +34,7 @@ func wsHandle(c *websocket.Conn, wsl *WSListener) {
 		pong:           make(chan struct{}, 5), // This shouldn't backlog, but allow for a few anyway.
 		errCh:          make(chan error, 1),
 		done:           make(chan struct{}),
+		pt:             pathtrie.PathTrie{},
 	}
 	wsl.AddListener(pc)
 	pc.Handle()
@@ -44,6 +48,10 @@ type proxyClient struct {
 	pong           chan struct{}
 	errCh          chan error
 	done           chan struct{}
+
+	mu    sync.Mutex
+	state map[string]interface{}
+	pt    pathtrie.PathTrie
 }
 
 func (pc *proxyClient) Handle() {
@@ -65,11 +73,34 @@ func (pc *proxyClient) readLoop() {
 			pc.err(err)
 			return
 		}
-		if cmd.Action == "Ping" {
+		switch cmd.Action {
+		case "Ping":
 			select {
 			case pc.pong <- struct{}{}:
 			default:
 			}
+		case "Register":
+			pc.mu.Lock()
+			// Send on paths just registered, and update trie for future ones.
+			added := pathtrie.PathTrie{}
+			for _, p := range cmd.Paths {
+				added.Add(p)
+				pc.pt.Add(p)
+			}
+			addedState := map[string]interface{}{}
+			for k, v := range pc.state {
+				if added.Covers(k) {
+					addedState[k] = v
+				}
+			}
+			pc.mu.Unlock()
+			select {
+			case pc.pendingUpdates <- addedState:
+			default:
+				// We cannot block here, as it'd stop updates for all clients.
+				pc.err(errors.New("update queue for client is full"))
+			}
+
 		}
 		select {
 		case <-pc.done:
@@ -88,7 +119,15 @@ func (pc *proxyClient) sendLoop() {
 			msg := ""
 			pc.send(&wsMessage{Pong: &msg})
 		case update := <-pc.pendingUpdates:
-			pc.send(&wsMessage{State: update})
+			filteredUpdate := map[string]interface{}{}
+			for k, v := range update {
+				if pc.pt.Covers(k) {
+					filteredUpdate[k] = v
+				}
+			}
+			if len(filteredUpdate) > 0 {
+				pc.send(&wsMessage{State: filteredUpdate})
+			}
 		}
 	}
 }
@@ -109,9 +148,12 @@ func (pc *proxyClient) err(err error) {
 	}
 }
 
-func (pc *proxyClient) Update(update map[string]interface{}) {
+func (pc *proxyClient) Update(update, full map[string]interface{}) {
 	select {
 	case pc.pendingUpdates <- update:
+		pc.mu.Lock()
+		pc.state = full
+		pc.mu.Unlock()
 	default:
 		// We cannot block here, as it'd stop updates for all clients.
 		pc.err(errors.New("update queue for client is full"))
