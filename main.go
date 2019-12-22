@@ -13,6 +13,8 @@ import (
 	"github.com/victorspringer/http-cache"
 	"github.com/victorspringer/http-cache/adapter/memory"
 	"gopkg.in/ini.v1"
+
+	"github.com/DerbyStats/wsproxy/pkg/keyfilter"
 )
 
 type staticProxy struct {
@@ -82,13 +84,18 @@ func main() {
 	if len(os.Args) >= 2 {
 		f = os.Args[1]
 	}
-	cfg, err := ini.Load(f)
+	cfg, err := ini.ShadowLoad(f)
 	if err != nil {
 		log.Fatalf("Failed to read config file %q: %v", f, err)
 	}
 	listenAddr := cfg.Section("").Key("listen_address").String()
 
-	wsl, err := newWSListener()
+	keyFilter, err := keyfilter.New(cfg.Section("").Key("filter_keys").ValueWithShadows())
+	if err != nil {
+		log.Fatal("keyFilter", err)
+	}
+
+	wsl, err := newWSListener(keyFilter)
 	if err != nil {
 		log.Fatal("newWSListener", err)
 	}

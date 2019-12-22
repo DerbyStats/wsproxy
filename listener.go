@@ -10,6 +10,8 @@ import (
 
 	"github.com/gorilla/websocket"
 	"github.com/juju/persistent-cookiejar"
+
+	"github.com/DerbyStats/wsproxy/pkg/keyfilter"
 )
 
 type wsMessage struct {
@@ -31,6 +33,7 @@ type UpdateListener interface {
 // A WSListener represents a connection to a Scoreboard,
 // which listens to WS updates and forwards them on.
 type WSListener struct {
+	kf        *keyfilter.KeyFilter
 	mu        sync.Mutex
 	state     map[string]interface{} // The current state.
 	listeners map[UpdateListener]struct{}
@@ -38,8 +41,9 @@ type WSListener struct {
 	loopMu sync.Mutex // Only allow one client loop at a time.
 }
 
-func newWSListener() (*WSListener, error) {
+func newWSListener(kf *keyfilter.KeyFilter) (*WSListener, error) {
 	return &WSListener{
+		kf:        kf,
 		state:     map[string]interface{}{},
 		listeners: map[UpdateListener]struct{}{},
 	}, nil
@@ -141,28 +145,34 @@ func (wsl *WSListener) clientLoop(c *websocket.Conn) error {
 		if msg.Error != "" {
 			return fmt.Errorf("error from scoreboard: %s", msg.Error)
 		} else if len(msg.State) != 0 {
+			filtered := make(map[string]interface{}, len(msg.State))
+			for k, v := range msg.State {
+				if wsl.kf.Keep(k) {
+					filtered[k] = v
+				}
+			}
 			wsl.mu.Lock()
 			if _, ok := msg.State["WS.Client.Id"]; !ok && initial {
 				// This is the first proper update from this connection, so have to clear out any
 				// keys that were previously sent but are not there any more.
 				withRemoved := map[string]interface{}{}
-				for k, v := range msg.State {
+				for k, v := range filtered {
 					if v == nil {
 						// This should't happen, but just in case.
-						delete(msg.State, k)
+						delete(filtered, k)
 						continue
 					}
 					withRemoved[k] = v
 				}
 				for k := range wsl.state {
-					if _, ok := msg.State[k]; !ok {
+					if _, ok := filtered[k]; !ok {
 						withRemoved[k] = nil
 					}
 				}
-				wsl.state = msg.State
+				wsl.state = filtered
 				initial = false
 			} else {
-				for k, v := range msg.State {
+				for k, v := range filtered {
 					if v == nil {
 						delete(wsl.state, k)
 					} else {
@@ -170,12 +180,14 @@ func (wsl *WSListener) clientLoop(c *websocket.Conn) error {
 					}
 				}
 			}
-			stateCopy := make(map[string]interface{}, len(wsl.state))
-			for k, v := range wsl.state {
-				stateCopy[k] = v
-			}
-			for l := range wsl.listeners {
-				l.Update(msg.State, stateCopy)
+			if len(filtered) > 0 {
+				stateCopy := make(map[string]interface{}, len(wsl.state))
+				for k, v := range wsl.state {
+					stateCopy[k] = v
+				}
+				for l := range wsl.listeners {
+					l.Update(filtered, stateCopy)
+				}
 			}
 			wsl.mu.Unlock()
 		}
