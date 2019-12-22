@@ -58,6 +58,7 @@ func (pc *proxyClient) readLoop() {
 		err := pc.c.ReadJSON(&cmd)
 		if err != nil {
 			pc.err(err)
+			return
 		}
 		if cmd.Action == "Ping" {
 			select {
