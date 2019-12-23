@@ -223,10 +223,10 @@ func (wsl *WSListener) RemoveListener(l UpdateListener) {
 	delete(wsl.listeners, l)
 }
 
-func (wsl *WSListener) Status() (time.Time, int) {
+func (wsl *WSListener) Status() (time.Time, int, map[string]interface{}) {
 	wsl.mu.Lock()
 	defer wsl.mu.Unlock()
-	return wsl.lastUpdate, len(wsl.listeners)
+	return wsl.lastUpdate, len(wsl.listeners), wsl.state
 }
 
 type WSDialer struct {
