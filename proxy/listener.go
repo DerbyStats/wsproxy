@@ -44,9 +44,10 @@ type WSListener struct {
 
 func NewWSListener(kf *keyfilter.KeyFilter) *WSListener {
 	return &WSListener{
-		kf:        kf,
-		state:     map[string]interface{}{},
-		listeners: map[UpdateListener]struct{}{},
+		kf:         kf,
+		state:      map[string]interface{}{},
+		listeners:  map[UpdateListener]struct{}{},
+		lastUpdate: time.Now(),
 	}
 }
 
@@ -143,6 +144,9 @@ func (wsl *WSListener) clientLoop(c *websocket.Conn) error {
 		if err != nil {
 			return err
 		}
+		wsl.mu.Lock()
+		wsl.lastUpdate = time.Now()
+		wsl.mu.Unlock()
 		if msg.Error != "" {
 			return fmt.Errorf("error from scoreboard: %s", msg.Error)
 		} else if len(msg.State) != 0 {
@@ -192,7 +196,6 @@ func (wsl *WSListener) clientLoop(c *websocket.Conn) error {
 					l.Update(filtered, stateCopy)
 				}
 			}
-			wsl.lastUpdate = time.Now()
 			wsl.mu.Unlock()
 		}
 

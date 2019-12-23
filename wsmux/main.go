@@ -108,6 +108,32 @@ func (m *WSMux) Listeners() []ListenerInfo {
 	return li
 }
 
+func (m *WSMux) Run() {
+	t := time.NewTicker(time.Minute * 5)
+	defer t.Stop()
+
+	for {
+		select {
+		case <-t.C:
+			m.gc()
+		}
+	}
+}
+
+func (m *WSMux) gc() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	now := time.Now()
+	for name, l := range m.listeners {
+		lu, c, _ := l.Status()
+		if c == 0 && lu.Add(time.Hour).Before(now) {
+			log.Println("GCing", name)
+			delete(m.listeners, name)
+		}
+	}
+
+}
+
 func (m *WSMux) Receive(w http.ResponseWriter, r *http.Request) {
 	// Ignore error if presented cookie didn't decode, a new one is provided automatically.
 	session, _ := m.store.Get(r, cookieName)
@@ -178,6 +204,7 @@ func main() {
 	https := cfg.Section("").Key("domain_https").MustBool()
 
 	mux := NewWSMux(keyFilter, domain, https)
+	go mux.Run()
 
 	http.HandleFunc("/receiver", mux.Receive)
 	// Serve up WS.
@@ -218,9 +245,9 @@ func main() {
     <head><title>Live Derby Stats</title></head>
     <body>
     <h1>Live Derby Stats</h1>
-    <p>We currenly have information from %d scoreboards.</p>
-    <table border=1 cellpadding="3em" cellspacing="0"><tr><th>Name</th><th>Clients</th><th>Summary</th><th>Last Update</th>
-    `, len(li))
+    <table border=1 cellpadding="3em" cellspacing="0">
+    <tr><th>Name</th><th>Clients</th><th>Summary</th><th>Age</th>
+    `)
 		scheme := "http"
 		if https {
 			scheme += "s"
@@ -228,6 +255,10 @@ func main() {
 		for _, l := range li {
 			summary := ""
 			t1 := l.GetString("ScoreBoard.Team(1).Name")
+			if t1 == "" {
+				// Connection with no matching pushes.
+				continue
+			}
 			t2 := l.GetString("ScoreBoard.Team(2).Name")
 			s1 := l.GetInt("ScoreBoard.Team(1).Score")
 			s2 := l.GetInt("ScoreBoard.Team(2).Score")
@@ -237,24 +268,18 @@ func main() {
 			pc := l.GetInt("ScoreBoard.Clock(Period).Time") / 1000
 			ic := l.GetInt("ScoreBoard.Clock(Intermission).Time") / 1000
 			icr := l.GetBool("ScoreBoard.Clock(Intermission).Running")
-			if t1 != "" {
-				// Have some data.
-				summary += fmt.Sprintf(" %s - %s", t1, t2)
-				score := fmt.Sprintf("%d - %d", s1, s2)
-				if official {
-					summary += fmt.Sprintf(", %s, Official Score", score)
-				} else if p != 0 {
-					// Game has started.
-					summary += fmt.Sprintf(", %s, P%d (%d:%02d) J%d", score, p, pc/60, pc%60, j)
-				} else if icr {
-					summary += fmt.Sprintf(", %d:%02d to Derby", ic/60, ic%60)
-				} else {
-					summary += fmt.Sprintf(", Not Started")
-				}
-			}
-			age := "Never"
-			if !l.LastUpdated.IsZero() {
-				age = now.Sub(l.LastUpdated).Round(time.Second * 10).String()
+			// Have some data.
+			summary += fmt.Sprintf(" %s - %s", t1, t2)
+			score := fmt.Sprintf("%d - %d", s1, s2)
+			if official {
+				summary += fmt.Sprintf(", %s, Official Score", score)
+			} else if p != 0 {
+				// Game has started.
+				summary += fmt.Sprintf(", %s, P%d (%d:%02d) J%d", score, p, pc/60, pc%60, j)
+			} else if icr {
+				summary += fmt.Sprintf(", %d:%02d to Derby", ic/60, ic%60)
+			} else {
+				summary += fmt.Sprintf(", Not Started")
 			}
 			fmt.Fprintf(w, `
       <tr>
@@ -266,7 +291,7 @@ func main() {
 				scheme, html.EscapeString(l.Name), domain, html.EscapeString(l.Name),
 				l.Clients,
 				html.EscapeString(summary),
-				age)
+				now.Sub(l.LastUpdated).Round(time.Second*10).String())
 		}
 
 		fmt.Fprintf(w, `
