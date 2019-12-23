@@ -13,6 +13,7 @@ import (
 	"gopkg.in/ini.v1"
 
 	"github.com/DerbyStats/wsproxy/pkg/keyfilter"
+	"github.com/DerbyStats/wsproxy/pkg/namegen"
 	"github.com/DerbyStats/wsproxy/proxy"
 )
 
@@ -50,7 +51,7 @@ func (m *WSMux) Receive(w http.ResponseWriter, r *http.Request) {
 	session, _ := m.store.Get(r, cookieName)
 	if session.Values["name"] == nil {
 		session.Values["id"] = uuid.New().String()
-		session.Values["name"] = session.Values["id"] // TODO something human readable.
+		session.Values["name"] = namegen.Generate()
 	}
 	if err := session.Save(r, w); err != nil {
 		http.Error(w, fmt.Sprintf("Error saving session: %v", err), http.StatusInternalServerError)
