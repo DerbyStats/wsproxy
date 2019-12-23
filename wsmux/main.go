@@ -70,11 +70,11 @@ func (m *WSMux) Receive(w http.ResponseWriter, r *http.Request) {
 }
 
 func (m *WSMux) WSHandler(w http.ResponseWriter, r *http.Request) {
-	parts := strings.SplitN(r.Host, ".", 2)
-	if len(parts) < 2 || (parts[1] != m.domain && !strings.HasPrefix(parts[1], m.domain+":")) {
+	if !isDirectSubdomain(r.Host, m.domain) {
 		http.Error(w, fmt.Sprintf("Bad Host: %v", r.Host), http.StatusBadRequest)
 		return
 	}
+	parts := strings.Split(r.Host, ".")
 	l := m.getListener(parts[0])
 	log.Println("Client connection for", parts[0])
 	proxy.WSHTTPHandler(w, r, l)
@@ -89,6 +89,11 @@ func (m *WSMux) getListener(name string) *proxy.WSListener {
 	l := proxy.NewWSListener(m.kf)
 	m.listeners[name] = l
 	return l
+}
+
+func isDirectSubdomain(host, domain string) bool {
+	parts := strings.SplitN(host, ".", 2)
+	return len(parts) == 2 && (parts[1] == domain || strings.HasPrefix(parts[1], domain+":"))
 }
 
 func main() {
@@ -107,13 +112,39 @@ func main() {
 	if err != nil {
 		log.Fatal("keyFilter", err)
 	}
+	domain := cfg.Section("").Key("domain").String()
 
-	mux := NewWSMux(keyFilter, cfg.Section("").Key("domain").String(), cfg.Section("").Key("domain_https").MustBool())
+	mux := NewWSMux(keyFilter, domain, cfg.Section("").Key("domain_https").MustBool())
 
 	http.HandleFunc("/receiver", mux.Receive)
 	// Serve up WS.
 	http.HandleFunc("/WS/", mux.WSHandler)
 	http.HandleFunc("/WS", mux.WSHandler)
+
+	htmlDir := cfg.Section("").Key("subdomain_html_directory").String()
+	fs := http.FileServer(http.Dir(htmlDir))
+	if htmlDir != "" {
+		log.Println("Serving subdomain content from", htmlDir)
+	}
+	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		if !isDirectSubdomain(r.Host, domain) {
+			http.Error(w, fmt.Sprintf("Bad Host: %v", r.Host), http.StatusBadRequest)
+			return
+		}
+		parts := strings.Split(r.Host, ".")
+		subdomain := parts[0]
+		if subdomain != "www" {
+			if htmlDir != "" {
+				fs.ServeHTTP(w, r)
+			} else {
+				fmt.Fprintf(w, "No subdomain_html_directory provided.")
+			}
+			return
+		}
+
+		// Main website.
+		fmt.Fprintf(w, "Welcome to %s", domain)
+	})
 
 	// Pushing to another proxy.
 	log.Println("Listening on", listenAddr)
