@@ -33,10 +33,11 @@ type UpdateListener interface {
 // A WSListener represents a connection to a Scoreboard,
 // which listens to WS updates and forwards them on.
 type WSListener struct {
-	kf        *keyfilter.KeyFilter
-	mu        sync.Mutex
-	state     map[string]interface{} // The current state.
-	listeners map[UpdateListener]struct{}
+	kf         *keyfilter.KeyFilter
+	mu         sync.Mutex
+	state      map[string]interface{} // The current state.
+	listeners  map[UpdateListener]struct{}
+	lastUpdate time.Time
 
 	loopMu sync.Mutex // Only allow one client loop at a time.
 }
@@ -191,6 +192,7 @@ func (wsl *WSListener) clientLoop(c *websocket.Conn) error {
 					l.Update(filtered, stateCopy)
 				}
 			}
+			wsl.lastUpdate = time.Now()
 			wsl.mu.Unlock()
 		}
 
@@ -219,6 +221,12 @@ func (wsl *WSListener) RemoveListener(l UpdateListener) {
 	defer wsl.mu.Unlock()
 
 	delete(wsl.listeners, l)
+}
+
+func (wsl *WSListener) Status() (time.Time, int) {
+	wsl.mu.Lock()
+	defer wsl.mu.Unlock()
+	return wsl.lastUpdate, len(wsl.listeners)
 }
 
 type WSDialer struct {

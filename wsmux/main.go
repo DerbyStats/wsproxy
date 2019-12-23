@@ -2,11 +2,14 @@ package main
 
 import (
 	"fmt"
+	"html"
 	"log"
 	"net/http"
 	"os"
+	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/gorilla/sessions"
@@ -44,6 +47,36 @@ func NewWSMux(kf *keyfilter.KeyFilter, domain string, https bool) *WSMux {
 		store:     store,
 		listeners: map[string]*proxy.WSListener{},
 	}
+}
+
+type ListenerInfo struct {
+	Name        string
+	LastUpdated time.Time
+	Clients     int
+}
+
+// Listeners returns information about all Listeners, in a sane order.
+func (m *WSMux) Listeners() []ListenerInfo {
+	m.mu.Lock()
+	li := make([]ListenerInfo, 0, len(m.listeners))
+	for name, l := range m.listeners {
+		lu, c := l.Status()
+		li = append(li, ListenerInfo{
+			Name:        name,
+			LastUpdated: lu,
+			Clients:     c,
+		})
+	}
+	m.mu.Unlock()
+
+	// Most clients first, then most recently updated.
+	sort.Slice(li, func(i, j int) bool {
+		if li[i].Clients == li[j].Clients {
+			return li[i].LastUpdated.After(li[j].LastUpdated)
+		}
+		return li[i].Clients > li[j].Clients
+	})
+	return li
 }
 
 func (m *WSMux) Receive(w http.ResponseWriter, r *http.Request) {
@@ -113,8 +146,9 @@ func main() {
 		log.Fatal("keyFilter", err)
 	}
 	domain := cfg.Section("").Key("domain").String()
+	https := cfg.Section("").Key("domain_https").MustBool()
 
-	mux := NewWSMux(keyFilter, domain, cfg.Section("").Key("domain_https").MustBool())
+	mux := NewWSMux(keyFilter, domain, https)
 
 	http.HandleFunc("/receiver", mux.Receive)
 	// Serve up WS.
@@ -142,8 +176,43 @@ func main() {
 			return
 		}
 
+		if r.URL.Path != "/" {
+			http.Error(w, "Not Found", http.StatusNotFound)
+			return
+		}
+
 		// Main website.
-		fmt.Fprintf(w, "Welcome to %s", domain)
+		li := mux.Listeners()
+		now := time.Now()
+		fmt.Fprintf(w, `
+    <html>
+    <head><title>Live Derby Stats</title></head>
+    <body>
+    <h1>Live Derby Stats</h1>
+    <p>We currenly have information from %d scoreboards.</p>
+    <table border=1 cellpadding="3em" cellspacing="0"><tr><th>Name</th><th>Clients</th><th>Last Update</th>
+    `, len(li))
+		scheme := "http"
+		if https {
+			scheme += "s"
+		}
+		for _, l := range li {
+			fmt.Fprintf(w, `
+      <tr>
+        <td><a href="%s://%s.%s/">%s</td>
+        <td>%d</td>
+        <td>%s</td>
+      </tr>`,
+				scheme, html.EscapeString(l.Name), domain, html.EscapeString(l.Name),
+				l.Clients,
+				now.Sub(l.LastUpdated).Round(time.Second*10).String())
+		}
+
+		fmt.Fprintf(w, `
+    </table>
+    <p><a href="https://github.com/DerbyStats/wsproxy">Source Code</a></p>
+    </body>
+    </html>`)
 	})
 
 	// Pushing to another proxy.
