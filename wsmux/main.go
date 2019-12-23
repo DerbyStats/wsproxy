@@ -23,13 +23,14 @@ const (
 type WSMux struct {
 	kf     *keyfilter.KeyFilter
 	domain string
+	https  bool
 	store  *sessions.CookieStore
 
 	mu        sync.Mutex
 	listeners map[string]*proxy.WSListener
 }
 
-func NewWSMux(kf *keyfilter.KeyFilter, domain string) *WSMux {
+func NewWSMux(kf *keyfilter.KeyFilter, domain string, https bool) *WSMux {
 	store := sessions.NewCookieStore([]byte("blah")) // TODO: Secure value.
 	store.Options.HttpOnly = true
 	// Keep for a year, you should have at least one game in that time
@@ -38,6 +39,7 @@ func NewWSMux(kf *keyfilter.KeyFilter, domain string) *WSMux {
 	return &WSMux{
 		kf:        kf,
 		domain:    domain,
+		https:     https,
 		store:     store,
 		listeners: map[string]*proxy.WSListener{},
 	}
@@ -56,6 +58,12 @@ func (m *WSMux) Receive(w http.ResponseWriter, r *http.Request) {
 	}
 	name := session.Values["name"].(string)
 	log.Println("Receiving WS push connection for", name)
+	url := "http"
+	if m.https {
+		url += "s"
+	}
+	url += "://" + name + "." + m.domain + "/"
+	w.Header().Set("Display-URL", url)
 	listener := m.getListener(name)
 	listener.Receive(w, r)
 }
@@ -99,7 +107,7 @@ func main() {
 		log.Fatal("keyFilter", err)
 	}
 
-	mux := NewWSMux(keyFilter, cfg.Section("").Key("domain").String())
+	mux := NewWSMux(keyFilter, cfg.Section("").Key("domain").String(), cfg.Section("").Key("domain_https").MustBool())
 
 	http.HandleFunc("/receiver", mux.Receive)
 	// Serve up WS.

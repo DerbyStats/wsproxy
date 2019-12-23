@@ -52,7 +52,7 @@ func NewWSListener(kf *keyfilter.KeyFilter) *WSListener {
 // Run keeps a WS connection open to the given URL.
 func (wsl *WSListener) Run(url string, dialer *WSDialer) {
 	for {
-		c, err := dialer.Dial(context.TODO(), url)
+		c, _, err := dialer.Dial(context.TODO(), url)
 		if err != nil {
 			log.Println("Connect:", err)
 			// Back off a bit.
@@ -243,15 +243,15 @@ func NewWSDialer() (*WSDialer, error) {
 	}, nil
 }
 
-func (d *WSDialer) Dial(context context.Context, url string) (*websocket.Conn, error) {
+func (d *WSDialer) Dial(context context.Context, url string) (*websocket.Conn, *http.Response, error) {
 	headers := http.Header{}
 	headers.Add("User-Agent", "DerbyStats WS Proxy") // TODO: Version.
-	c, _, err := d.dialer.DialContext(context, url, headers)
+	c, h, err := d.dialer.DialContext(context, url, headers)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if err := d.cookieJar.Save(); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	return c, nil
+	return c, h, nil
 }

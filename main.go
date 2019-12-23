@@ -77,7 +77,7 @@ func (sp staticProxy) proxy(w http.ResponseWriter, r *http.Request) {
 
 func pushLoop(url string, wsl *proxy.WSListener, d *proxy.WSDialer) {
 	for {
-		c, err := d.Dial(context.TODO(), url)
+		c, r, err := d.Dial(context.TODO(), url)
 		if err != nil {
 			log.Println("Push connect error:", err)
 			// Back off a bit.
@@ -85,6 +85,9 @@ func pushLoop(url string, wsl *proxy.WSListener, d *proxy.WSDialer) {
 			continue
 		}
 		log.Println("Push connected to", url)
+		if r.Header.Get("Display-URl") != "" {
+			log.Println("View on", r.Header.Get("Display-URL"))
+		}
 		proxy.WSHandle(c, wsl)
 		time.Sleep(time.Second * 5)
 	}
