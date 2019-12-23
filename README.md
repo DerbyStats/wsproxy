@@ -17,6 +17,8 @@ as an argument.
 There are two basic deployment scenarios, either providing live game stats only
 to fans onsite via the local network or providing them via the internet.
 
+By default the proxy will push offsite to https://www.derbystats.eu
+
 ## On-Site
 
 On-site usage allows this proxy to serve screens to fans, without them hitting
