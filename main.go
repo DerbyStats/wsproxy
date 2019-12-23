@@ -8,14 +8,15 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/victorspringer/http-cache"
 	"github.com/victorspringer/http-cache/adapter/memory"
 	"gopkg.in/ini.v1"
 
-	"github.com/DerbyStats/wsproxy/proxy"
 	"github.com/DerbyStats/wsproxy/pkg/keyfilter"
+	"github.com/DerbyStats/wsproxy/proxy"
 )
 
 type staticProxy struct {
@@ -74,16 +75,16 @@ func (sp staticProxy) proxy(w http.ResponseWriter, r *http.Request) {
 	io.Copy(w, resp.Body)
 }
 
-func pushLoop(hostAddr string, wsl *proxy.WSListener, d *proxy.WSDialer) {
+func pushLoop(url string, wsl *proxy.WSListener, d *proxy.WSDialer) {
 	for {
-		c, err := d.Dial(context.TODO(), "ws://"+hostAddr+"/receiver")
+		c, err := d.Dial(context.TODO(), url)
 		if err != nil {
 			log.Println("Push connect error:", err)
 			// Back off a bit.
 			time.Sleep(time.Second * 5)
 			continue
 		}
-		log.Println("Push connected to", hostAddr)
+		log.Println("Push connected to", url)
 		proxy.WSHandle(c, wsl)
 		time.Sleep(time.Second * 5)
 	}
@@ -106,10 +107,7 @@ func main() {
 		log.Fatal("keyFilter", err)
 	}
 
-	wsl, err := proxy.NewWSListener(keyFilter)
-	if err != nil {
-		log.Fatal("newWSListener", err)
-	}
+	wsl := proxy.NewWSListener(keyFilter)
 
 	wsd, err := proxy.NewWSDialer()
 	if err != nil {
@@ -165,10 +163,13 @@ func main() {
 	http.HandleFunc("/WS", func(w http.ResponseWriter, r *http.Request) { proxy.WSHTTPHandler(w, r, wsl) })
 
 	// Pushing to another proxy.
-	pushAddr := cfg.Section("").Key("push_address").String()
-	if pushAddr != "" {
-		log.Println("Pushing to", pushAddr, "configured.")
-		go pushLoop(pushAddr, wsl, wsd)
+	pushURL := cfg.Section("").Key("push_address").String()
+	if pushURL != "" {
+		if !strings.HasPrefix(pushURL, "wss://") && !strings.HasPrefix(pushURL, "ws://") {
+			pushURL = "ws://" + pushURL
+		}
+		log.Println("Pushing to", pushURL, "configured.")
+		go pushLoop(pushURL+"/receiver", wsl, wsd)
 	}
 
 	log.Println("Listening on", listenAddr)

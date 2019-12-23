@@ -41,12 +41,12 @@ type WSListener struct {
 	loopMu sync.Mutex // Only allow one client loop at a time.
 }
 
-func NewWSListener(kf *keyfilter.KeyFilter) (*WSListener, error) {
+func NewWSListener(kf *keyfilter.KeyFilter) *WSListener {
 	return &WSListener{
 		kf:        kf,
 		state:     map[string]interface{}{},
 		listeners: map[UpdateListener]struct{}{},
-	}, nil
+	}
 }
 
 // Run keeps a WS connection open to the given URL.
@@ -72,7 +72,7 @@ func (wsl *WSListener) Run(url string, dialer *WSDialer) {
 // Receive uses an inbound WS connection. This is an alternative to Run.
 func (wsl *WSListener) Receive(w http.ResponseWriter, r *http.Request) {
 	upgrader := &websocket.Upgrader{}
-	c, err := upgrader.Upgrade(w, r, nil)
+	c, err := upgrader.Upgrade(w, r, w.Header())
 	if err != nil {
 		log.Println(err)
 		return
