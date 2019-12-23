@@ -3,14 +3,20 @@ allowing for on-site and off-site read-only viewing of screens with live game st
 
 # Usage
 
+Download the binaries from the [releases page](https://github.com/DerbyStats/wsproxy/releases),
+and extract them. Run the relevant binary for your machine (Darwin = OS X).
+
+`config.ini` is the default configuration file loaded. A path to a config file can be passed
+as an argument.
+
+# Building
+
 ```
 go get -d
 go build
 ./wsproxy
 ```
 
-`config.ini` is the default configuration file loaded. A path to a config file can be passed
-as an argument.
 
 # Deployment
 
