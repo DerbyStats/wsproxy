@@ -153,7 +153,11 @@ func main() {
 		http.Handle("/", cacheClient.Middleware(http.HandlerFunc(sp.proxy)))
 	} else if htmlDir != "" {
 		log.Println("Serving static content from", htmlDir)
-		http.Handle("/", http.FileServer(http.Dir(htmlDir)))
+		fs := http.FileServer(http.Dir(htmlDir))
+		http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Cache-Control", "no-cache")
+			fs.ServeHTTP(w, r)
+		})
 	} else {
 		log.Println("No scoreboard_address or html_directory provided, so no static content will be served.")
 		http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
