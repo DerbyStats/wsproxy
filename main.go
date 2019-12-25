@@ -48,7 +48,7 @@ func (sp staticProxy) proxy(w http.ResponseWriter, r *http.Request) {
 
 	resp, err := client.Do(request)
 	if err != nil {
-		http.Error(w, "Error creating request", http.StatusInternalServerError)
+		http.Error(w, "Error making request to scoreboard", http.StatusBadGateway)
 		return
 	}
 	for k := range resp.Header {
