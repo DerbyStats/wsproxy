@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -61,6 +62,7 @@ func NewWSListener(ctx context.Context, kf *keyfilter.KeyFilter, stateFile strin
 		ctxCancel: cancel,
 		kf:        kf,
 		stateFile: stateFile,
+		state:     map[string]interface{}{},
 		listeners: map[UpdateListener]struct{}{},
 	}
 	wsl.readStateFile()
@@ -183,54 +185,51 @@ func (wsl *WSListener) clientLoop(c *websocket.Conn) error {
 		wsl.mu.Lock()
 		wsl.lastUpdate = time.Now()
 		wsl.mu.Unlock()
+		// Ignore any extra information we may have been sent, such as WS.Client.
+		// Also ignore filtered information.
+		for k := range msg.State {
+			if !strings.HasPrefix(k, "ScoreBoard.") || !wsl.kf.Keep(k) {
+				delete(msg.State, k)
+			}
+		}
 		if msg.Error != "" {
 			return fmt.Errorf("error from scoreboard: %s", msg.Error)
 		} else if len(msg.State) != 0 {
-			filtered := make(map[string]interface{}, len(msg.State))
-			for k, v := range msg.State {
-				if wsl.kf.Keep(k) {
-					filtered[k] = v
-				}
-			}
 			wsl.mu.Lock()
-			if _, ok := msg.State["WS.Client.Id"]; !ok && initial {
+			newState := make(map[string]interface{}, len(wsl.state))
+			if initial {
+				for k, v := range msg.State {
+					if v == nil {
+						// This shouldn't happen.
+						delete(newState, k)
+					} else {
+						newState[k] = v
+					}
+				}
 				// This is the first proper update from this connection, so have to clear out any
 				// keys that were previously sent but are not there any more.
-				withRemoved := map[string]interface{}{}
-				for k, v := range filtered {
-					if v == nil {
-						// This should't happen, but just in case.
-						delete(filtered, k)
-						continue
-					}
-					withRemoved[k] = v
-				}
 				for k := range wsl.state {
-					if _, ok := filtered[k]; !ok {
-						withRemoved[k] = nil
+					if _, ok := newState[k]; !ok {
+						msg.State[k] = nil
+						println(k)
 					}
 				}
-				wsl.state = filtered
-				filtered = withRemoved // Want to send in the full lot.
 				initial = false
 			} else {
-				for k, v := range filtered {
+				for k, v := range wsl.state {
+					newState[k] = v
+				}
+				for k, v := range msg.State {
 					if v == nil {
-						delete(wsl.state, k)
+						delete(newState, k)
 					} else {
-						wsl.state[k] = v
+						newState[k] = v
 					}
 				}
 			}
-			if len(filtered) > 0 {
-				// Use a copy to avoid data races.
-				stateCopy := make(map[string]interface{}, len(wsl.state))
-				for k, v := range wsl.state {
-					stateCopy[k] = v
-				}
-				for l := range wsl.listeners {
-					l.Update(filtered, stateCopy)
-				}
+			wsl.state = newState
+			for l := range wsl.listeners {
+				l.Update(msg.State, newState)
 			}
 			wsl.mu.Unlock()
 		}
@@ -241,7 +240,7 @@ func (wsl *WSListener) clientLoop(c *websocket.Conn) error {
 func (wsl *WSListener) writeStateFile() {
 	wsl.mu.Lock()
 	defer wsl.mu.Unlock()
-	if wsl.stateFile == "" || wsl.state == nil {
+	if wsl.stateFile == "" || wsl.lastUpdate.IsZero() {
 		return
 	}
 	dir := filepath.Dir(wsl.stateFile)
@@ -342,11 +341,7 @@ func (wsl *WSListener) AddListener(l UpdateListener) {
 	defer wsl.mu.Unlock()
 
 	wsl.listeners[l] = struct{}{}
-	stateCopy := make(map[string]interface{}, len(wsl.state))
-	for k, v := range wsl.state {
-		stateCopy[k] = v
-	}
-	l.Update(stateCopy, stateCopy)
+	l.Update(wsl.state, wsl.state)
 }
 
 // RemoveListener removes a listener.
