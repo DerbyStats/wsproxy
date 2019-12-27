@@ -147,12 +147,28 @@ func readCookie(r *http.Request) (string, string) {
 	return name, secret
 }
 
+func generateName() string {
+	exists := func(name string) bool {
+		_, err := os.Stat(filepath.Join("data", name, cookieFileName))
+		return !os.IsNotExist(err)
+	}
+	// Give a few chances to find a nice name.
+	for i := 0; i < 10; i++ {
+		name := namegen.Generate()
+		if !exists(name) {
+			return name
+		}
+	}
+	// Fallback to a UUID.
+	return uuid.New().String()
+}
+
 func (m *WSMux) getSessionName(w http.ResponseWriter, r *http.Request) (string, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	name, secret := readCookie(r)
 	if name == "" {
-		name = namegen.Generate()    // TODO: Handle collissions.
+		name = generateName()
 		secret = uuid.New().String() // This is based on crypto/rand.
 		fn := filepath.Join("data", name, cookieFileName)
 		err := os.MkdirAll(filepath.Dir(fn), 0o777)
@@ -187,6 +203,7 @@ func (m *WSMux) getSessionName(w http.ResponseWriter, r *http.Request) (string, 
 		// A scoreboard should connect at least once per year.
 		MaxAge:   86400 * 365,
 		HttpOnly: true,
+		SameSite: http.SameSiteStrictMode,
 		Secure:   m.externalURL.Scheme == "https",
 	}
 	http.SetCookie(w, cookie)
