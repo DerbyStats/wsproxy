@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"io/ioutil"
 	"log"
 	"net/http"
 	"net/url"
@@ -10,13 +11,13 @@ import (
 	"os/signal"
 	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/gorilla/mux"
-	"github.com/gorilla/sessions"
 	"gopkg.in/ini.v1"
 
 	"github.com/DerbyStats/wsproxy/pkg/keyfilter"
@@ -25,30 +26,24 @@ import (
 )
 
 const (
-	cookieName = "wsmux"
+	cookieName     = "wsmux"
+	cookieFileName = "cookieId"
 )
 
 type WSMux struct {
 	ctx         context.Context
 	kf          *keyfilter.KeyFilter
 	externalURL *url.URL
-	store       *sessions.CookieStore
 
 	mu        sync.Mutex
 	listeners map[string]*proxy.WSListener
 }
 
 func NewWSMux(ctx context.Context, kf *keyfilter.KeyFilter, externalURL *url.URL) *WSMux {
-	store := sessions.NewCookieStore([]byte("blah")) // TODO: Secure value.
-	store.Options.HttpOnly = true
-	// Keep for a year, you should have at least one game in that time
-	// which will refresh this.
-	store.Options.MaxAge = 86400 * 365
 	return &WSMux{
 		ctx:         ctx,
 		kf:          kf,
 		externalURL: externalURL,
-		store:       store,
 		listeners:   map[string]*proxy.WSListener{},
 	}
 }
@@ -126,24 +121,85 @@ func (m *WSMux) gc() {
 	}
 }
 
+func readCookie(r *http.Request) (string, string) {
+	cookie, err := r.Cookie(cookieName)
+	if err != nil {
+		return "", ""
+	}
+	parts := strings.Split(cookie.Value, ":")
+	if len(parts) != 2 {
+		return "", ""
+	}
+	name := parts[0]
+	secret := parts[1]
+	// Untrusted user input, check for directory transversal.
+	if filepath.Base(name) != name || name == "" {
+		return "", ""
+	}
+	content, err := ioutil.ReadFile(filepath.Join("data", name, cookieFileName))
+	if err != nil {
+		return "", ""
+	}
+	if string(content) != secret {
+		return "", ""
+	}
+	// Everything checks out, this is a valid cookie.
+	return name, secret
+}
+
+func (m *WSMux) getSessionName(w http.ResponseWriter, r *http.Request) (string, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	name, secret := readCookie(r)
+	if name == "" {
+		name = namegen.Generate()    // TODO: Handle collissions.
+		secret = uuid.New().String() // This is based on crypto/rand.
+		fn := filepath.Join("data", name, cookieFileName)
+		err := os.MkdirAll(filepath.Dir(fn), 0o777)
+		if err != nil {
+			return "", err
+		}
+		// Concurrent access isn't a concern, but we don't want to write a partial file.
+		f, err := ioutil.TempFile(filepath.Dir(fn), filepath.Base(fn))
+		if err != nil {
+			return "", err
+		}
+		defer func() {
+			f.Close()
+			os.Remove(f.Name())
+		}()
+		_, err = f.Write([]byte(secret))
+		if err != nil {
+			return "", err
+		}
+		err = f.Close()
+		if err != nil {
+			return "", err
+		}
+		err = os.Rename(f.Name(), fn)
+		if err != nil {
+			return "", err
+		}
+	}
+	cookie := &http.Cookie{
+		Name:  cookieName,
+		Value: name + ":" + secret,
+		// A scoreboard should connect at least once per year.
+		MaxAge:   86400 * 365,
+		HttpOnly: true,
+		Secure:   m.externalURL.Scheme == "https",
+	}
+	http.SetCookie(w, cookie)
+	return name, nil
+}
+
 func (m *WSMux) Receive(w http.ResponseWriter, r *http.Request) {
-	// Ignore error if presented cookie didn't decode, a new one is provided automatically.
-	session, _ := m.store.Get(r, cookieName)
-	if session.Values["name"] == nil {
-		session.Values["id"] = uuid.New().String()
-		session.Values["name"] = namegen.Generate()
-	}
-	if err := session.Save(r, w); err != nil {
-		http.Error(w, fmt.Sprintf("Error saving session: %v", err), http.StatusInternalServerError)
+	name, err := m.getSessionName(w, r)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("Error getting session: %v", err), http.StatusInternalServerError)
 		return
 	}
-	name := session.Values["name"].(string)
 	log.Println("Receiving WS push connection for", name)
-	// Just in case, check for directory transversal.
-	if filepath.Base(name) != name {
-		http.Error(w, fmt.Sprintf("Invalid name: %q", name), http.StatusInternalServerError)
-		return
-	}
 	u := *m.externalURL
 	u.Host = name + "." + u.Host
 	w.Header().Set("Display-URL", u.String())
@@ -164,6 +220,7 @@ func (m *WSMux) getListener(name string) *proxy.WSListener {
 	if l, ok := m.listeners[name]; ok {
 		return l
 	}
+	// This does IO, should we move it away from the lock?
 	l := proxy.NewWSListener(m.ctx, m.kf, filepath.Join("data", name, "state.json"))
 	m.listeners[name] = l
 	return l

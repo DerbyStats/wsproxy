@@ -297,6 +297,12 @@ func (wsl *WSListener) readStateFile() {
 		log.Println("Error decoding state file", err)
 		return
 	}
+	// The keepFilter may have changed.
+	for k := range wsl.state {
+		if !wsl.kf.Keep(k) {
+			delete(wsl.state, k)
+		}
+	}
 	fi, err := f.Stat()
 	if err != nil {
 		log.Println("Error statting state file", err)
