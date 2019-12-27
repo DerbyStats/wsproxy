@@ -2,9 +2,13 @@ package proxy
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"io/ioutil"
 	"log"
 	"net/http"
+	"os"
+	"path/filepath"
 	"sync"
 	"time"
 
@@ -39,6 +43,7 @@ type WSListener struct {
 	ctx       context.Context
 	ctxCancel func()
 	kf        *keyfilter.KeyFilter
+	stateFile string
 
 	mu         sync.Mutex
 	state      map[string]interface{} // The current state.
@@ -49,16 +54,18 @@ type WSListener struct {
 	loopMu sync.Mutex // Only allow one client loop at a time.
 }
 
-func NewWSListener(ctx context.Context, kf *keyfilter.KeyFilter) *WSListener {
+func NewWSListener(ctx context.Context, kf *keyfilter.KeyFilter, stateFile string) *WSListener {
 	c, cancel := context.WithCancel(ctx)
-	return &WSListener{
+	wsl := &WSListener{
 		ctx:        c,
 		ctxCancel:  cancel,
 		kf:         kf,
-		state:      map[string]interface{}{},
+		stateFile:  stateFile,
 		listeners:  map[UpdateListener]struct{}{},
 		lastUpdate: time.Now(),
 	}
+	wsl.readStateFile()
+	return wsl
 }
 
 // Run keeps a WS connection open to the given URL.
@@ -104,6 +111,7 @@ func (wsl *WSListener) clientLoop(c *websocket.Conn) error {
 		wsl.mu.Lock()
 		wsl.conn = nil
 		wsl.mu.Unlock()
+		wsl.writeStateFile()
 	}()
 
 	// Check if this listener was already shutdown.
@@ -228,6 +236,62 @@ func (wsl *WSListener) clientLoop(c *websocket.Conn) error {
 			wsl.mu.Unlock()
 		}
 
+	}
+}
+
+func (wsl *WSListener) writeStateFile() {
+	wsl.mu.Lock()
+	defer wsl.mu.Unlock()
+	if wsl.stateFile == "" || wsl.state == nil {
+		return
+	}
+	f, err := ioutil.TempFile(filepath.Dir(wsl.stateFile), filepath.Base(wsl.stateFile))
+	if err != nil {
+		log.Println("Error creating tmp state file", err)
+		return
+	}
+	defer func() {
+		f.Close()
+		os.Remove(f.Name())
+	}()
+	enc := json.NewEncoder(f)
+	enc.SetIndent("", "  ")
+	err = enc.Encode(wsl.state)
+	if err != nil {
+		log.Println("Error writing to tmp state file", err)
+		return
+	}
+	err = f.Close()
+	if err != nil {
+		log.Println("Error closing tmp state file", err)
+		return
+	}
+	err = os.Rename(f.Name(), wsl.stateFile)
+	if err != nil {
+		log.Println("Error renaming tmp state file", err)
+		return
+	}
+}
+
+func (wsl *WSListener) readStateFile() {
+	wsl.mu.Lock()
+	defer wsl.mu.Unlock()
+	if wsl.stateFile == "" {
+		return
+	}
+	f, err := os.Open(wsl.stateFile)
+	if err != nil {
+		if !os.IsNotExist(err) {
+			log.Println("Error opening state file", err)
+		}
+		return
+	}
+	defer f.Close()
+	enc := json.NewDecoder(f)
+	err = enc.Decode(&wsl.state)
+	if err != nil {
+		log.Println("Error decoding tmp state file", err)
+		return
 	}
 }
 

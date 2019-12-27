@@ -1,2 +1,4 @@
 .cookies
 wsproxy
+wsmux
+state.json

@@ -112,7 +112,7 @@ func main() {
 		log.Fatal("keyFilter", err)
 	}
 
-	wsl := proxy.NewWSListener(context.Background(), keyFilter)
+	wsl := proxy.NewWSListener(context.Background(), keyFilter, "state.json")
 
 	wsd, err := proxy.NewWSDialer()
 	if err != nil {
