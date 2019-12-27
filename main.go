@@ -110,7 +110,7 @@ func main() {
 		log.Fatal("keyFilter", err)
 	}
 
-	wsl := proxy.NewWSListener(keyFilter)
+	wsl := proxy.NewWSListener(context.TODO(), keyFilter)
 
 	wsd, err := proxy.NewWSDialer()
 	if err != nil {

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"net/http"
@@ -25,6 +26,7 @@ const (
 )
 
 type WSMux struct {
+	ctx         context.Context
 	kf          *keyfilter.KeyFilter
 	externalURL *url.URL
 	store       *sessions.CookieStore
@@ -33,13 +35,14 @@ type WSMux struct {
 	listeners map[string]*proxy.WSListener
 }
 
-func NewWSMux(kf *keyfilter.KeyFilter, externalURL *url.URL) *WSMux {
+func NewWSMux(ctx context.Context, kf *keyfilter.KeyFilter, externalURL *url.URL) *WSMux {
 	store := sessions.NewCookieStore([]byte("blah")) // TODO: Secure value.
 	store.Options.HttpOnly = true
 	// Keep for a year, you should have at least one game in that time
 	// which will refresh this.
 	store.Options.MaxAge = 86400 * 365
 	return &WSMux{
+		ctx:         ctx,
 		kf:          kf,
 		externalURL: externalURL,
 		store:       store,
@@ -86,16 +89,27 @@ func (m *WSMux) Run() {
 
 func (m *WSMux) gc() {
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	now := time.Now()
+	type todo struct {
+		name string
+		l    *proxy.WSListener
+	}
+	todos := []todo{}
 	for name, l := range m.listeners {
 		lu, c, _ := l.Status()
 		if c == 0 && lu.Add(time.Hour).Before(now) {
-			log.Println("GCing", name)
-			delete(m.listeners, name)
+			todos = append(todos, todo{name: name, l: l})
 		}
 	}
+	m.mu.Unlock()
 
+	for _, t := range todos {
+		// Shutdown might take a while, so do it outside the lock.
+		t.l.Shutdown()
+		m.mu.Lock()
+		delete(m.listeners, t.name)
+		m.mu.Unlock()
+	}
 }
 
 func (m *WSMux) Receive(w http.ResponseWriter, r *http.Request) {
@@ -131,7 +145,7 @@ func (m *WSMux) getListener(name string) *proxy.WSListener {
 	if l, ok := m.listeners[name]; ok {
 		return l
 	}
-	l := proxy.NewWSListener(m.kf)
+	l := proxy.NewWSListener(m.ctx, m.kf)
 	m.listeners[name] = l
 	return l
 }
@@ -157,7 +171,7 @@ func main() {
 		log.Fatal("externalURL,", err)
 	}
 
-	wsMux := NewWSMux(keyFilter, externalURL)
+	wsMux := NewWSMux(context.TODO(), keyFilter, externalURL)
 	go wsMux.Run()
 
 	r := mux.NewRouter()

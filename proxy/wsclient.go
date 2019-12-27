@@ -161,3 +161,7 @@ func (pc *proxyClient) Update(update, full map[string]interface{}) {
 		pc.err(errors.New("update queue for client is full"))
 	}
 }
+
+func (pc *proxyClient) UpdatesDone() {
+	pc.err(errors.New("Listener has stopped sending updates."))
+}

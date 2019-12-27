@@ -28,22 +28,32 @@ type wsCommand struct {
 type UpdateListener interface {
 	// What just changed and the new full state.
 	Update(update, full map[string]interface{})
+
+	// This update source is done, any future updates won't be reported.
+	UpdatesDone()
 }
 
 // A WSListener represents a connection to a Scoreboard,
 // which listens to WS updates and forwards them on.
 type WSListener struct {
-	kf         *keyfilter.KeyFilter
+	ctx       context.Context
+	ctxCancel func()
+	kf        *keyfilter.KeyFilter
+
 	mu         sync.Mutex
 	state      map[string]interface{} // The current state.
 	listeners  map[UpdateListener]struct{}
 	lastUpdate time.Time
+	conn       *websocket.Conn
 
 	loopMu sync.Mutex // Only allow one client loop at a time.
 }
 
-func NewWSListener(kf *keyfilter.KeyFilter) *WSListener {
+func NewWSListener(ctx context.Context, kf *keyfilter.KeyFilter) *WSListener {
+	c, cancel := context.WithCancel(ctx)
 	return &WSListener{
+		ctx:        c,
+		ctxCancel:  cancel,
 		kf:         kf,
 		state:      map[string]interface{}{},
 		listeners:  map[UpdateListener]struct{}{},
@@ -87,6 +97,22 @@ func (wsl *WSListener) Receive(w http.ResponseWriter, r *http.Request) {
 func (wsl *WSListener) clientLoop(c *websocket.Conn) error {
 	wsl.loopMu.Lock()
 	defer wsl.loopMu.Unlock()
+	wsl.mu.Lock()
+	wsl.conn = c
+	wsl.mu.Unlock()
+	defer func() {
+		wsl.mu.Lock()
+		wsl.conn = nil
+		wsl.mu.Unlock()
+	}()
+
+	// Check if this listener was already shutdown.
+	select {
+	case <-wsl.ctx.Done():
+		return wsl.ctx.Err()
+	default:
+	}
+
 	pingerStopped := make(chan struct{}, 0)
 	stopPinger := make(chan struct{}, 0)
 
@@ -131,7 +157,9 @@ func (wsl *WSListener) clientLoop(c *websocket.Conn) error {
 	for {
 		select {
 		case <-pingerStopped:
-			break
+			return nil
+		case <-wsl.ctx.Done():
+			return wsl.ctx.Err()
 		default:
 		}
 		// We should get a pong every few seconds, if we're not seeing one then the
@@ -139,6 +167,7 @@ func (wsl *WSListener) clientLoop(c *websocket.Conn) error {
 		// just be a poor WiFI setup and trying more often would only increase
 		// bandwidth usage and make it worse.
 		c.SetReadDeadline(time.Now().Add(time.Second * 30))
+
 		var msg wsMessage
 		err := c.ReadJSON(&msg)
 		if err != nil {
@@ -200,13 +229,40 @@ func (wsl *WSListener) clientLoop(c *websocket.Conn) error {
 		}
 
 	}
-	return nil
+}
+
+// Shutdown the listener.
+func (wsl *WSListener) Shutdown() {
+	wsl.ctxCancel()
+	wsl.mu.Lock()
+	if wsl.conn != nil {
+		// Cancel any blocking reads.
+		wsl.conn.Close()
+	}
+	wsl.mu.Unlock()
+
+	// Wait for clientLoop return.
+	wsl.loopMu.Lock()
+	wsl.loopMu.Unlock()
+
+	// Let any remaining listners know what we're done.
+	wsl.mu.Lock()
+	for l := range wsl.listeners {
+		l.UpdatesDone()
+	}
+	wsl.mu.Unlock()
 }
 
 // AddListener adds a listener.
 //
 // The initial update will be in the same thread.
 func (wsl *WSListener) AddListener(l UpdateListener) {
+	select {
+	case <-wsl.ctx.Done():
+		l.UpdatesDone()
+		return
+	default:
+	}
 	wsl.mu.Lock()
 	defer wsl.mu.Unlock()
 
@@ -218,7 +274,7 @@ func (wsl *WSListener) AddListener(l UpdateListener) {
 	l.Update(stateCopy, stateCopy)
 }
 
-// AddListener removes a listener.
+// RemoveListener removes a listener.
 func (wsl *WSListener) RemoveListener(l UpdateListener) {
 	wsl.mu.Lock()
 	defer wsl.mu.Unlock()
