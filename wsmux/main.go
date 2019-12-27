@@ -200,6 +200,7 @@ func (m *WSMux) getSessionName(w http.ResponseWriter, r *http.Request) (string, 
 	cookie := &http.Cookie{
 		Name:  cookieName,
 		Value: name + ":" + secret,
+		Path:  "/receiver",
 		// A scoreboard should connect at least once per year.
 		MaxAge:   86400 * 365,
 		HttpOnly: true,
