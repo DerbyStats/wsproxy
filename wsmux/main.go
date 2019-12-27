@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io/ioutil"
 	"log"
@@ -10,7 +11,6 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
-	"sort"
 	"strings"
 	"sync"
 	"syscall"
@@ -35,46 +35,78 @@ type WSMux struct {
 	kf          *keyfilter.KeyFilter
 	externalURL *url.URL
 
-	mu        sync.Mutex
+	mu sync.Mutex
+	// Listeners that are currently active.
 	listeners map[string]*proxy.WSListener
+	// Potential listeners that are not currently active.
+	oldListeners map[string]*ListenerInfo
 }
 
 func NewWSMux(ctx context.Context, kf *keyfilter.KeyFilter, externalURL *url.URL) *WSMux {
+	files, err := filepath.Glob("data/*/state.json")
+	if err != nil {
+		// Should never happen.
+		panic(err)
+	}
+	oldListeners := map[string]*ListenerInfo{}
+	for _, fn := range files {
+		li := &ListenerInfo{Name: filepath.Base(filepath.Dir(fn))}
+		fi, err := os.Stat(fn)
+		li.LastUpdated = fi.ModTime()
+		if err != nil {
+			continue
+		}
+		f, err := os.Open(fn)
+		if err != nil {
+			continue
+		}
+		enc := json.NewDecoder(f)
+		var state map[string]interface{}
+		err = enc.Decode(&state)
+		if err != nil {
+			f.Close()
+			continue
+		}
+		f.Close()
+		li.CalculateSummary(state)
+		if li.Summary != "" {
+			oldListeners[li.Name] = li
+		}
+	}
+
 	return &WSMux{
-		ctx:         ctx,
-		kf:          kf,
-		externalURL: externalURL,
-		listeners:   map[string]*proxy.WSListener{},
+		ctx:          ctx,
+		kf:           kf,
+		externalURL:  externalURL,
+		listeners:    map[string]*proxy.WSListener{},
+		oldListeners: oldListeners,
 	}
 }
 
-// Listeners returns information about all Listeners, in a sane order.
-func (m *WSMux) Listeners() []ListenerInfo {
+// Listeners returns information about all Listeners.
+func (m *WSMux) Listeners() []*ListenerInfo {
 	m.mu.Lock()
-	li := make([]ListenerInfo, 0, len(m.listeners))
+	res := make([]*ListenerInfo, 0, len(m.listeners)+len(m.oldListeners))
 	for name, l := range m.listeners {
 		lu, c, s := l.Status()
-		li = append(li, ListenerInfo{
+		li := &ListenerInfo{
 			Name:        name,
 			LastUpdated: lu,
 			Clients:     c,
-			State:       s,
-		})
+		}
+		li.CalculateSummary(s)
+		res = append(res, li)
+	}
+	for _, ol := range m.oldListeners {
+		res = append(res, ol)
 	}
 	m.mu.Unlock()
 
-	// Most clients first, then most recently updated.
-	sort.Slice(li, func(i, j int) bool {
-		if li[i].Clients == li[j].Clients {
-			return li[i].LastUpdated.After(li[j].LastUpdated)
-		}
-		return li[i].Clients > li[j].Clients
-	})
-	return li
+	return res
 }
 
 func (m *WSMux) Run() {
-	t := time.NewTicker(time.Minute * 5)
+	t := time.NewTicker(time.Minute)
 	defer t.Stop()
 
 	for {
@@ -106,17 +138,28 @@ func (m *WSMux) gc() {
 	todos := []todo{}
 	for name, l := range m.listeners {
 		lu, c, _ := l.Status()
-		if c == 0 && lu.Add(time.Hour).Before(now) {
+		if c == 0 && lu.Add(time.Minute*5).Before(now) {
 			todos = append(todos, todo{name: name, l: l})
 		}
 	}
 	m.mu.Unlock()
 
 	for _, t := range todos {
+		log.Println("Moving listener to cold storage", t.name)
 		// Shutdown might take a while, so do it outside the lock.
 		t.l.Shutdown()
 		m.mu.Lock()
 		delete(m.listeners, t.name)
+		lu, _, state := t.l.Status()
+		li := &ListenerInfo{
+			Name:        t.name,
+			LastUpdated: lu,
+		}
+		li.CalculateSummary(state)
+		if li.Summary != "" {
+			// Don't save it if it was never pushed to.
+			m.oldListeners[t.name] = li
+		}
 		m.mu.Unlock()
 	}
 }
@@ -241,6 +284,7 @@ func (m *WSMux) getListener(name string) *proxy.WSListener {
 	// This does IO, should we move it away from the lock?
 	l := proxy.NewWSListener(m.ctx, m.kf, filepath.Join("data", name, "state.json"))
 	m.listeners[name] = l
+	delete(m.oldListeners, name)
 	return l
 }
 

@@ -211,7 +211,6 @@ func (wsl *WSListener) clientLoop(c *websocket.Conn) error {
 				for k := range wsl.state {
 					if _, ok := newState[k]; !ok {
 						msg.State[k] = nil
-						println(k)
 					}
 				}
 				initial = false
@@ -305,7 +304,7 @@ func (wsl *WSListener) readStateFile() {
 	}
 	fi, err := f.Stat()
 	if err != nil {
-		log.Println("Error statting state file", err)
+		log.Println("Error stating state file", err)
 		return
 	}
 	wsl.lastUpdate = fi.ModTime()
