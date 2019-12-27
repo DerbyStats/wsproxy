@@ -7,8 +7,10 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"os/signal"
 	"sort"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/google/uuid"
@@ -83,8 +85,19 @@ func (m *WSMux) Run() {
 		select {
 		case <-t.C:
 			m.gc()
+		case <-m.ctx.Done():
+			return
 		}
 	}
+}
+
+func (m *WSMux) Shutdown() {
+	m.mu.Lock()
+	for name, l := range m.listeners {
+		l.Shutdown()
+		delete(m.listeners, name)
+	}
+	m.mu.Unlock()
 }
 
 func (m *WSMux) gc() {
@@ -207,7 +220,17 @@ func main() {
 		}
 	})
 
-	http.Handle("/", r)
+	term := make(chan os.Signal, 1)
+	signal.Notify(term, os.Interrupt, syscall.SIGTERM, syscall.SIGINT)
+
 	log.Println("Listening on", listenAddr)
-	log.Fatal(http.ListenAndServe(listenAddr, nil))
+	httpSrv := &http.Server{Addr: listenAddr, Handler: r}
+	go httpSrv.ListenAndServe()
+
+	s := <-term
+	log.Println("Shutting down, got signal", s)
+	go httpSrv.Shutdown(context.Background()) // Stop accepting new connections.
+	wsMux.Shutdown()
+	log.Println("Shutdown complete")
+	os.Exit(0)
 }

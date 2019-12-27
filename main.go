@@ -8,7 +8,9 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"os/signal"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/victorspringer/http-cache"
@@ -110,7 +112,7 @@ func main() {
 		log.Fatal("keyFilter", err)
 	}
 
-	wsl := proxy.NewWSListener(context.TODO(), keyFilter)
+	wsl := proxy.NewWSListener(context.Background(), keyFilter)
 
 	wsd, err := proxy.NewWSDialer()
 	if err != nil {
@@ -179,6 +181,17 @@ func main() {
 		go pushLoop(pushURL+"/receiver", wsl, wsd)
 	}
 
+	term := make(chan os.Signal, 1)
+	signal.Notify(term, os.Interrupt, syscall.SIGTERM, syscall.SIGINT)
+
 	log.Println("Listening on", listenAddr)
-	log.Fatal(http.ListenAndServe(listenAddr, nil))
+	httpSrv := &http.Server{Addr: listenAddr}
+	go httpSrv.ListenAndServe()
+
+	s := <-term
+	log.Println("Shutting down, got signal", s)
+	go httpSrv.Shutdown(context.Background()) // Stop accepting new connections.
+	wsl.Shutdown()
+	log.Println("Shutdown complete")
+	os.Exit(0)
 }
