@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"sort"
 	"sync"
 	"syscall"
@@ -138,6 +139,11 @@ func (m *WSMux) Receive(w http.ResponseWriter, r *http.Request) {
 	}
 	name := session.Values["name"].(string)
 	log.Println("Receiving WS push connection for", name)
+	// Just in case, check for directory transversal.
+	if filepath.Base(name) != name {
+		http.Error(w, fmt.Sprintf("Invalid name: %q", name), http.StatusInternalServerError)
+		return
+	}
 	u := *m.externalURL
 	u.Host = name + "." + u.Host
 	w.Header().Set("Display-URL", u.String())
@@ -158,7 +164,7 @@ func (m *WSMux) getListener(name string) *proxy.WSListener {
 	if l, ok := m.listeners[name]; ok {
 		return l
 	}
-	l := proxy.NewWSListener(m.ctx, m.kf)
+	l := proxy.NewWSListener(m.ctx, m.kf, filepath.Join("data", name, "state.json"))
 	m.listeners[name] = l
 	return l
 }

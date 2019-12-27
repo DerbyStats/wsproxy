@@ -57,12 +57,11 @@ type WSListener struct {
 func NewWSListener(ctx context.Context, kf *keyfilter.KeyFilter, stateFile string) *WSListener {
 	c, cancel := context.WithCancel(ctx)
 	wsl := &WSListener{
-		ctx:        c,
-		ctxCancel:  cancel,
-		kf:         kf,
-		stateFile:  stateFile,
-		listeners:  map[UpdateListener]struct{}{},
-		lastUpdate: time.Now(),
+		ctx:       c,
+		ctxCancel: cancel,
+		kf:        kf,
+		stateFile: stateFile,
+		listeners: map[UpdateListener]struct{}{},
 	}
 	wsl.readStateFile()
 	return wsl
@@ -245,6 +244,12 @@ func (wsl *WSListener) writeStateFile() {
 	if wsl.stateFile == "" || wsl.state == nil {
 		return
 	}
+	dir := filepath.Dir(wsl.stateFile)
+	err := os.MkdirAll(dir, 0o777)
+	if err != nil {
+		log.Println("Error creating state directory", err)
+		return
+	}
 	f, err := ioutil.TempFile(filepath.Dir(wsl.stateFile), filepath.Base(wsl.stateFile))
 	if err != nil {
 		log.Println("Error creating tmp state file", err)
@@ -290,9 +295,15 @@ func (wsl *WSListener) readStateFile() {
 	enc := json.NewDecoder(f)
 	err = enc.Decode(&wsl.state)
 	if err != nil {
-		log.Println("Error decoding tmp state file", err)
+		log.Println("Error decoding state file", err)
 		return
 	}
+	fi, err := f.Stat()
+	if err != nil {
+		log.Println("Error statting state file", err)
+		return
+	}
+	wsl.lastUpdate = fi.ModTime()
 }
 
 // Shutdown the listener.
