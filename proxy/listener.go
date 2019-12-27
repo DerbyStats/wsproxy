@@ -163,6 +163,7 @@ func (wsl *WSListener) clientLoop(c *websocket.Conn) error {
 	log.Println("Connected and registered")
 
 	initial := true
+	lastWrite := time.Time{}
 	for {
 		select {
 		case <-pingerStopped:
@@ -231,6 +232,11 @@ func (wsl *WSListener) clientLoop(c *websocket.Conn) error {
 				l.Update(msg.State, newState)
 			}
 			wsl.mu.Unlock()
+		}
+		// Write out to disk every 30s or so, in case we crash.
+		if lastWrite.Add(time.Second * 30).Before(time.Now()) {
+			wsl.writeStateFile()
+			lastWrite = time.Now()
 		}
 
 	}
