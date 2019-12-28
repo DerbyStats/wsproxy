@@ -3,13 +3,14 @@ package proxy
 import (
 	"context"
 	"fmt"
-	"log"
 	"net/http"
 	"os"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/go-kit/kit/log"
+	"github.com/go-kit/kit/log/level"
 	"github.com/gorilla/websocket"
 	"github.com/juju/persistent-cookiejar"
 	"github.com/prometheus/client_golang/prometheus"
@@ -75,6 +76,7 @@ type UpdateListener interface {
 type WSListener struct {
 	ctx       context.Context
 	ctxCancel func()
+	logger    log.Logger
 	kf        *keyfilter.KeyFilter
 	stateFile string
 
@@ -87,11 +89,12 @@ type WSListener struct {
 	loopMu sync.Mutex // Only allow one client loop at a time.
 }
 
-func NewWSListener(ctx context.Context, kf *keyfilter.KeyFilter, stateFile string) *WSListener {
+func NewWSListener(ctx context.Context, logger log.Logger, kf *keyfilter.KeyFilter, stateFile string) *WSListener {
 	c, cancel := context.WithCancel(ctx)
 	wsl := &WSListener{
 		ctx:       c,
 		ctxCancel: cancel,
+		logger:    logger,
 		kf:        kf,
 		stateFile: stateFile,
 		listeners: map[UpdateListener]struct{}{},
@@ -105,31 +108,32 @@ func (wsl *WSListener) Run(url string, dialer *WSDialer) {
 	for {
 		c, _, err := dialer.Dial(context.TODO(), url)
 		if err != nil {
-			log.Println("Connect:", err)
+			level.Error(wsl.logger).Log("msg", "Listener connection error", "err", err)
 			// Back off a bit.
 			time.Sleep(time.Second * 5)
 			continue
 		}
+		level.Info(wsl.logger).Log("msg", "Listener has dialed connection")
 		err = wsl.clientLoop(c)
 		if err != nil {
-			log.Println("Listener loop:", err)
+			level.Error(wsl.logger).Log("msg", "Listener loop error", "err", err)
 		}
 		c.Close()
-		// Back off a bit.
-		time.Sleep(time.Second * 5)
 	}
 }
 
 // Receive uses an inbound WS connection. This is an alternative to Run.
 func (wsl *WSListener) Receive(w http.ResponseWriter, r *http.Request) {
+	logger := log.With(wsl.logger, "remoteAddr", r.RemoteAddr, "X-Forwarded-For", r.Header.Get("X-Forwarded-For"))
+	level.Info(logger).Log("msg", "Listener received a WS push connection")
 	upgrader := &websocket.Upgrader{}
 	c, err := upgrader.Upgrade(w, r, w.Header())
 	if err != nil {
-		log.Println(err)
+		level.Error(logger).Log("msg", "Listener receive upgrade error", "err", err)
 		return
 	}
-	log.Println("Received a WS push connection")
-	wsl.clientLoop(c)
+	err = wsl.clientLoop(c)
+	level.Info(logger).Log("msg", "Listener loop error", "err", err)
 	c.Close()
 }
 
@@ -165,6 +169,7 @@ func (wsl *WSListener) clientLoop(c *websocket.Conn) error {
 	if err != nil {
 		return err
 	}
+	level.Debug(wsl.logger).Log("msg", "Listener has registered")
 
 	// Ping to keep the connection alive when there's no
 	// data to be transmitted between games.
@@ -182,7 +187,7 @@ func (wsl *WSListener) clientLoop(c *websocket.Conn) error {
 				c.SetWriteDeadline(time.Now().Add(time.Second * 30))
 				err := c.WriteMessage(websocket.TextMessage, []byte(`{"action": "Ping"}`))
 				if err != nil {
-					log.Println("Ping error", err)
+					level.Debug(wsl.logger).Log("msg", "Ping write error", "err", err)
 					return
 				}
 			case <-stopPinger:
@@ -193,8 +198,6 @@ func (wsl *WSListener) clientLoop(c *websocket.Conn) error {
 	defer func() {
 		close(stopPinger)
 	}()
-
-	log.Println("Connected and registered")
 
 	initial := true
 	lastWrite := time.Time{}
@@ -277,7 +280,6 @@ func (wsl *WSListener) clientLoop(c *websocket.Conn) error {
 			wsl.writeStateFile()
 			lastWrite = time.Now()
 		}
-
 	}
 }
 
@@ -292,7 +294,7 @@ func (wsl *WSListener) writeStateFile() {
 	timer.ObserveDuration()
 	if err != nil {
 		stateFileWritesFailed.Inc()
-		log.Println("Error writing state file", err)
+		level.Error(wsl.logger).Log("msg", "Error writing state file", "err", err)
 		return
 	}
 }
@@ -306,7 +308,7 @@ func (wsl *WSListener) readStateFile() {
 	state, err := wsstate.ReadStateFile(wsl.stateFile)
 	if err != nil {
 		if !os.IsNotExist(err) {
-			log.Println("Error opening state file", err)
+			level.Error(wsl.logger).Log("msg", "Error opening state file", "err", err)
 		}
 		return
 	}
@@ -319,7 +321,7 @@ func (wsl *WSListener) readStateFile() {
 	wsl.state = state
 	fi, err := os.Stat(wsl.stateFile)
 	if err != nil {
-		log.Println("Error stating state file", err)
+		level.Error(wsl.logger).Log("msg", "Error stating state file", "err", err)
 		return
 	}
 	wsl.lastUpdate = fi.ModTime()

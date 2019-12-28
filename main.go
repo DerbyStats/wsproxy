@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"log"
 	"net/http"
 	"net/url"
 	"os"
@@ -13,6 +12,8 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/go-kit/kit/log"
+	"github.com/go-kit/kit/log/level"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/victorspringer/http-cache"
 	"github.com/victorspringer/http-cache/adapter/memory"
@@ -78,25 +79,29 @@ func (sp staticProxy) proxy(w http.ResponseWriter, r *http.Request) {
 	io.Copy(w, resp.Body)
 }
 
-func pushLoop(url string, wsl *proxy.WSListener, d *proxy.WSDialer) {
+func pushLoop(url string, wsl *proxy.WSListener, d *proxy.WSDialer, logger log.Logger) {
 	for {
 		c, r, err := d.Dial(context.TODO(), url)
 		if err != nil {
-			log.Println("Push connect error:", err)
+			level.Error(logger).Log("msg", "Push connection error", "err", err)
 			// Back off a bit.
 			time.Sleep(time.Second * 5)
 			continue
 		}
-		log.Println("Push connected to", url)
-		if r.Header.Get("Display-URl") != "" {
-			log.Println("View on", r.Header.Get("Display-URL"))
+		level.Info(logger).Log("msg", "Push connection made", "url", url)
+		display := r.Header.Get("Display-URL")
+		if display != "" {
+			level.Debug(logger).Log("msg", "Got display URL from push connection", "url", display)
+			// Make it really obvious.
+			fmt.Printf("\n\nDisplay URL: %s\n\n\n", display)
 		}
-		proxy.WSHandle(c, wsl)
-		time.Sleep(time.Second * 5)
+		err = proxy.WSHandle(c, wsl, log.With(logger, "pushURL", url))
+		level.Info(logger).Log("msg", "Push connection closed", "err", err)
 	}
 }
 
 func main() {
+	logger := log.NewLogfmtLogger(log.NewSyncWriter(os.Stdout))
 	f := "config.ini"
 	// First argument can be an alternate config file.
 	if len(os.Args) >= 2 {
@@ -104,30 +109,39 @@ func main() {
 	}
 	cfg, err := ini.ShadowLoad(f)
 	if err != nil {
-		log.Fatalf("Failed to read config file %q: %v", f, err)
+		level.Error(logger).Log("msg", "Failed to read config file", "file", f, "err", err)
+		os.Exit(1)
 	}
-	listenAddr := cfg.Section("").Key("listen_address").String()
+
+	if cfg.Section("").Key("log_level").String() != "debug" {
+		logger = level.NewFilter(logger, level.AllowInfo())
+	} else {
+		logger = level.NewFilter(logger, level.AllowAll())
+	}
+	logger = log.With(logger, "ts", log.DefaultTimestampUTC, "caller", log.DefaultCaller)
 
 	keyFilter, err := keyfilter.New(cfg.Section("").Key("filter_keys").ValueWithShadows())
 	if err != nil {
-		log.Fatal("keyFilter", err)
+		level.Error(logger).Log("msg", "Error creating keyFilter", "err", err)
+		os.Exit(1)
 	}
 
-	wsl := proxy.NewWSListener(context.Background(), keyFilter, "state.json")
+	wsl := proxy.NewWSListener(context.Background(), logger, keyFilter, "state.json")
 
 	wsd, err := proxy.NewWSDialer()
 	if err != nil {
-		log.Fatal("newWSDialer", err)
+		level.Error(logger).Log("msg", "Error creating WSDialer", "err", err)
+		os.Exit(1)
 	}
 
 	scoreboardAddr := cfg.Section("").Key("scoreboard_address").String()
 	if scoreboardAddr != "" {
-		log.Println("Will get updates from", scoreboardAddr)
+		level.Info(logger).Log("msg", "Will get WS updates from scoreboard", "scoreboardAddr", scoreboardAddr)
 		// Option 1: Connect out to a scoreboard.
 		go wsl.Run("ws://"+scoreboardAddr+"/WS", wsd)
 
 	} else {
-		log.Println("No scoreboard_address, waiting for something to push to us.")
+		level.Info(logger).Log("msg", "No scoreboard_address, waiting for something to push WS updates to us.")
 		// Option 2: Wait for the connection to come to us.
 		http.HandleFunc("/receiver", wsl.Receive)
 	}
@@ -135,42 +149,43 @@ func main() {
 	// Static content.
 	htmlDir := cfg.Section("").Key("html_directory").String()
 	if scoreboardAddr != "" && htmlDir == "" {
-		log.Println("Proxying static content from", scoreboardAddr)
+		level.Info(logger).Log("msg", "Proxying static content from scoreboard", "scoreboardAddr", scoreboardAddr)
 		// Serve up static content, which only makes sense if we can talk to the scoreboard.
 		memory, err := memory.NewAdapter(
 			memory.AdapterWithAlgorithm(memory.LRU),
 			memory.AdapterWithCapacity(10000), // Number of cache entries.
 		)
 		if err != nil {
-			log.Fatal("memory cache", err)
+			level.Error(logger).Log("msg", "Failed to create memory cache", "err", err)
+			os.Exit(1)
 		}
 		cacheClient, err := cache.NewClient(
 			cache.ClientWithAdapter(memory),
 			cache.ClientWithTTL(1*time.Minute),
 		)
 		if err != nil {
-			log.Fatal("cache client", err)
+			level.Error(logger).Log("msg", "Failed to create memory cache client", "err", err)
+			os.Exit(1)
 		}
 
 		sp := staticProxy{addr: scoreboardAddr}
 		http.Handle("/", cacheClient.Middleware(http.HandlerFunc(sp.proxy)))
 	} else if htmlDir != "" {
-		log.Println("Serving static content from", htmlDir)
+		level.Info(logger).Log("msg", "Serving static content from directory", "dir", htmlDir)
 		fs := http.FileServer(http.Dir(htmlDir))
 		http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Cache-Control", "no-cache")
 			fs.ServeHTTP(w, r)
 		})
 	} else {
-		log.Println("No scoreboard_address or html_directory provided, so no static content will be served.")
+		level.Info(logger).Log("msg", "No scoreboard_address or html_directory provided, so no static content will be served.")
 		http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 			fmt.Fprintf(w, "No scoreboard_address or html_directory provided.")
 		})
 	}
 
 	// Serve up WS.
-	http.HandleFunc("/WS/", func(w http.ResponseWriter, r *http.Request) { proxy.WSHTTPHandler(w, r, wsl) })
-	http.HandleFunc("/WS", func(w http.ResponseWriter, r *http.Request) { proxy.WSHTTPHandler(w, r, wsl) })
+	http.HandleFunc("/WS/", func(w http.ResponseWriter, r *http.Request) { proxy.WSHTTPHandler(w, r, wsl, logger) })
 
 	// Pushing to another proxy.
 	pushURL := cfg.Section("").Key("push_address").String()
@@ -178,8 +193,8 @@ func main() {
 		if !strings.HasPrefix(pushURL, "wss://") && !strings.HasPrefix(pushURL, "ws://") {
 			pushURL = "ws://" + pushURL
 		}
-		log.Println("Pushing to", pushURL, "configured.")
-		go pushLoop(pushURL+"/receiver", wsl, wsd)
+		level.Info(logger).Log("msg", "Pushing configured", "url", pushURL)
+		go pushLoop(pushURL+"/receiver", wsl, wsd, logger)
 	}
 
 	http.Handle("/metrics", promhttp.Handler())
@@ -187,14 +202,15 @@ func main() {
 	term := make(chan os.Signal, 1)
 	signal.Notify(term, os.Interrupt, syscall.SIGTERM, syscall.SIGINT)
 
-	log.Println("Listening on", listenAddr)
+	listenAddr := cfg.Section("").Key("listen_address").String()
+	level.Info(logger).Log("msg", "Listening for HTTP", "addr", listenAddr)
 	httpSrv := &http.Server{Addr: listenAddr}
 	go httpSrv.ListenAndServe()
 
 	s := <-term
-	log.Println("Shutting down, got signal", s)
+	level.Info(logger).Log("msg", "Shutting down due to signal", "signal", s)
 	go httpSrv.Shutdown(context.Background()) // Stop accepting new connections.
 	wsl.Shutdown()
-	log.Println("Shutdown complete")
+	level.Info(logger).Log("msg", "Shutdown complete. Exiting.")
 	os.Exit(0)
 }

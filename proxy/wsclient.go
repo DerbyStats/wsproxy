@@ -3,11 +3,12 @@ package proxy
 import (
 	"encoding/json"
 	"errors"
-	"log"
 	"net/http"
 	"sync"
 	"time"
 
+	"github.com/go-kit/kit/log"
+	"github.com/go-kit/kit/log/level"
 	"github.com/gorilla/websocket"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
@@ -48,20 +49,22 @@ var (
 )
 
 // wsHandler handles an inbound HTTP WS connection.
-func WSHTTPHandler(w http.ResponseWriter, r *http.Request, wsl *WSListener) {
+func WSHTTPHandler(w http.ResponseWriter, r *http.Request, wsl *WSListener, logger log.Logger) {
+	logger = log.With(logger, "remoteAddr", r.RemoteAddr, "X-Forwarded-For", r.Header.Get("X-Forwarded-For"))
 	upgrader := &websocket.Upgrader{}
 	c, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
-		log.Println(err)
-		return
+		level.Error(logger).Log("msg", "Error upgrading websocket connection", "err", err)
 	}
-	WSHandle(c, wsl)
+	err = WSHandle(c, wsl, logger)
+	level.Error(logger).Log("msg", "Error handling websocket connection", "err", err)
 }
 
 // wsHandler handles an inbound WS connection.
-func WSHandle(c *websocket.Conn, wsl *WSListener) {
+func WSHandle(c *websocket.Conn, wsl *WSListener, logger log.Logger) error {
 	pc := &proxyClient{
-		c: c,
+		logger: logger,
+		c:      c,
 		// Allow a small backlog of updates in case we get behind in sending,
 		// however for a client that has gone away the TCP send queue will have
 		// to fill before we start backing up here.
@@ -74,13 +77,15 @@ func WSHandle(c *websocket.Conn, wsl *WSListener) {
 	startedClients.Inc()
 	activeClients.Inc()
 	wsl.AddListener(pc)
-	pc.Handle()
+	err := pc.Handle()
 	wsl.RemoveListener(pc)
 	activeClients.Dec()
+	return err
 }
 
 // proxyClient is a WS client connecting to us, looking for WS updates.
 type proxyClient struct {
+	logger         log.Logger
 	c              *websocket.Conn
 	pendingUpdates chan map[string]interface{}
 	pong           chan struct{}
@@ -92,13 +97,14 @@ type proxyClient struct {
 	pt    pathtrie.PathTrie
 }
 
-func (pc *proxyClient) Handle() {
+func (pc *proxyClient) Handle() error {
+	level.Debug(pc.logger).Log("msg", "Starting handling for client")
 	go pc.sendLoop()
 	go pc.readLoop()
 	err := <-pc.errCh
-	log.Println("proxyClient", err)
 	close(pc.done)
 	pc.c.Close()
+	return err
 }
 
 func (pc *proxyClient) readLoop() {

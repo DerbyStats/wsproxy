@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"io/ioutil"
-	"log"
 	"net/http"
 	"net/url"
 	"os"
@@ -15,6 +14,8 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/go-kit/kit/log"
+	"github.com/go-kit/kit/log/level"
 	"github.com/google/uuid"
 	"github.com/gorilla/mux"
 	"github.com/prometheus/client_golang/prometheus"
@@ -58,6 +59,7 @@ const (
 
 type WSMux struct {
 	ctx         context.Context
+	logger      log.Logger
 	kf          *keyfilter.KeyFilter
 	externalURL *url.URL
 
@@ -68,7 +70,7 @@ type WSMux struct {
 	oldListeners map[string]*ListenerInfo
 }
 
-func NewWSMux(ctx context.Context, kf *keyfilter.KeyFilter, externalURL *url.URL) *WSMux {
+func NewWSMux(ctx context.Context, logger log.Logger, kf *keyfilter.KeyFilter, externalURL *url.URL) *WSMux {
 	files, err := filepath.Glob("data/*/state.json")
 	if err != nil {
 		// Should never happen.
@@ -80,10 +82,12 @@ func NewWSMux(ctx context.Context, kf *keyfilter.KeyFilter, externalURL *url.URL
 		fi, err := os.Stat(fn)
 		li.LastUpdated = fi.ModTime()
 		if err != nil {
+			level.Debug(logger).Log("msg", "Error stating state file", "path", fn, "err", err)
 			continue
 		}
 		state, err := wsstate.ReadStateFile(fn)
 		if err != nil {
+			level.Debug(logger).Log("msg", "Error reading state file", "path", fn, "err", err)
 			continue
 		}
 		li.Summary = state.Summary()
@@ -94,6 +98,7 @@ func NewWSMux(ctx context.Context, kf *keyfilter.KeyFilter, externalURL *url.URL
 
 	return &WSMux{
 		ctx:          ctx,
+		logger:       logger,
 		kf:           kf,
 		externalURL:  externalURL,
 		listeners:    map[string]*proxy.WSListener{},
@@ -170,7 +175,7 @@ func (m *WSMux) gc() {
 	m.mu.Unlock()
 
 	for _, t := range todos {
-		log.Println("Moving listener to cold storage", t.name)
+		level.Debug(m.logger).Log("msg", "Moving listener to cold storage", "listener", t.name)
 		// Shutdown might take a while, so do it outside the lock.
 		t.l.Shutdown()
 		m.mu.Lock()
@@ -186,6 +191,9 @@ func (m *WSMux) gc() {
 			m.oldListeners[t.name] = li
 		}
 		m.mu.Unlock()
+	}
+	if len(todos) > 0 {
+		level.Info(m.logger).Log("msg", "Moved listeners to cold storage", "count", len(todos))
 	}
 }
 
@@ -288,10 +296,10 @@ func (m *WSMux) getSessionName(w http.ResponseWriter, r *http.Request) (string, 
 func (m *WSMux) Receive(w http.ResponseWriter, r *http.Request) {
 	name, err := m.getSessionName(w, r)
 	if err != nil {
+		level.Info(m.logger).Log("msg", "Error getting session", "err", err)
 		http.Error(w, fmt.Sprintf("Error getting session: %v", err), http.StatusInternalServerError)
 		return
 	}
-	log.Println("Receiving WS push connection for", name)
 	u := *m.externalURL
 	u.Host = name + "." + u.Host
 	w.Header().Set("Display-URL", u.String())
@@ -302,8 +310,7 @@ func (m *WSMux) Receive(w http.ResponseWriter, r *http.Request) {
 func (m *WSMux) WSHandler(w http.ResponseWriter, r *http.Request) {
 	subdomain := mux.Vars(r)["subdomain"]
 	l := m.getListener(subdomain)
-	log.Println("Client connection for", subdomain)
-	proxy.WSHTTPHandler(w, r, l)
+	proxy.WSHTTPHandler(w, r, l, log.With(m.logger, "listener", subdomain))
 }
 
 func (m *WSMux) getListener(name string) *proxy.WSListener {
@@ -314,7 +321,7 @@ func (m *WSMux) getListener(name string) *proxy.WSListener {
 	}
 	// This does IO, should we move it away from the lock?
 	timer := prometheus.NewTimer(newListenerDuration)
-	l := proxy.NewWSListener(m.ctx, m.kf, filepath.Join("data", name, "state.json"))
+	l := proxy.NewWSListener(m.ctx, log.With(m.logger, "listener", name), m.kf, filepath.Join("data", name, "state.json"))
 	timer.ObserveDuration()
 	m.listeners[name] = l
 	delete(m.oldListeners, name)
@@ -349,7 +356,7 @@ func prometheusMiddleware(next http.Handler) http.Handler {
 		host = strings.Split(host, ".")[0] // Only need the subdomain.
 		var timer *prometheus.Timer
 		switch path {
-		case "/WS", "/WS/", "/receiver":
+		case "/WS/", "/receiver":
 			// Ignore WS paths.
 		default:
 			timer = prometheus.NewTimer(httpDuration.WithLabelValues(host, path))
@@ -364,6 +371,7 @@ func prometheusMiddleware(next http.Handler) http.Handler {
 }
 
 func main() {
+	logger := log.NewLogfmtLogger(log.NewSyncWriter(os.Stdout))
 	f := "config.ini"
 	// First argument can be an alternate config file.
 	if len(os.Args) >= 2 {
@@ -371,20 +379,29 @@ func main() {
 	}
 	cfg, err := ini.ShadowLoad(f)
 	if err != nil {
-		log.Fatalf("Failed to read config file %q: %v", f, err)
+		level.Error(logger).Log("msg", "Failed to read config file", "file", f, "err", err)
+		os.Exit(1)
 	}
-	listenAddr := cfg.Section("").Key("listen_address").String()
+
+	if cfg.Section("").Key("log_level").String() != "debug" {
+		logger = level.NewFilter(logger, level.AllowInfo())
+	} else {
+		logger = level.NewFilter(logger, level.AllowAll())
+	}
+	logger = log.With(logger, "ts", log.DefaultTimestampUTC, "caller", log.DefaultCaller)
 
 	keyFilter, err := keyfilter.New(cfg.Section("").Key("filter_keys").ValueWithShadows())
 	if err != nil {
-		log.Fatal("keyFilter", err)
+		level.Error(logger).Log("msg", "Error creating keyFilter", "err", err)
+		os.Exit(1)
 	}
 	externalURL, err := url.Parse(cfg.Section("").Key("external_url").String())
 	if err != nil {
-		log.Fatal("externalURL,", err)
+		level.Error(logger).Log("msg", "Error parsing external_url", "err", err)
+		os.Exit(1)
 	}
 
-	wsMux := NewWSMux(context.TODO(), keyFilter, externalURL)
+	wsMux := NewWSMux(context.TODO(), logger, keyFilter, externalURL)
 	go wsMux.Run()
 	prometheus.MustRegister(wsMux)
 
@@ -394,7 +411,6 @@ func main() {
 
 	r.HandleFunc("/receiver", wsMux.Receive)
 	// Serve up WS.
-	r.Host("{subdomain}." + externalURL.Host).Path("/WS").HandlerFunc(wsMux.WSHandler)
 	r.Host("{subdomain}." + externalURL.Host).Path("/WS/").HandlerFunc(wsMux.WSHandler)
 
 	// Homepage.
@@ -412,7 +428,7 @@ func main() {
 	htmlDir := cfg.Section("").Key("subdomain_html_directory").String()
 	fs := http.FileServer(http.Dir(htmlDir))
 	if htmlDir != "" {
-		log.Println("Serving subdomain content from", htmlDir)
+		level.Debug(logger).Log("msg", "Serving subdomain content", "dir", htmlDir)
 	}
 	r.Host("{subdomain}." + externalURL.Host).HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if htmlDir != "" {
@@ -426,14 +442,15 @@ func main() {
 	term := make(chan os.Signal, 1)
 	signal.Notify(term, os.Interrupt, syscall.SIGTERM, syscall.SIGINT)
 
-	log.Println("Listening on", listenAddr)
+	listenAddr := cfg.Section("").Key("listen_address").String()
+	level.Info(logger).Log("msg", "Listening for HTTP", "addr", listenAddr)
 	httpSrv := &http.Server{Addr: listenAddr, Handler: r}
 	go httpSrv.ListenAndServe()
 
 	s := <-term
-	log.Println("Shutting down, got signal", s)
+	level.Info(logger).Log("msg", "Shutting down due to signal", "signal", s)
 	go httpSrv.Shutdown(context.Background()) // Stop accepting new connections.
 	wsMux.Shutdown()
-	log.Println("Shutdown complete")
+	level.Info(logger).Log("msg", "Shutdown complete. Exiting.")
 	os.Exit(0)
 }
