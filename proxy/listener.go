@@ -2,13 +2,10 @@ package proxy
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
-	"io/ioutil"
 	"log"
 	"net/http"
 	"os"
-	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -17,12 +14,13 @@ import (
 	"github.com/juju/persistent-cookiejar"
 
 	"github.com/DerbyStats/wsproxy/pkg/keyfilter"
+	"github.com/DerbyStats/wsproxy/pkg/wsstate"
 )
 
 type wsMessage struct {
-	Pong  *string                `json:"Pong,omitempty"`
-	Error string                 `json:"error,omitempty"`
-	State map[string]interface{} `json:"state,omitempty"`
+	Pong  *string       `json:"Pong,omitempty"`
+	Error string        `json:"error,omitempty"`
+	State wsstate.State `json:"state,omitempty"`
 }
 
 type wsCommand struct {
@@ -47,7 +45,7 @@ type WSListener struct {
 	stateFile string
 
 	mu         sync.Mutex
-	state      map[string]interface{} // The current state.
+	state      wsstate.State // The current state.
 	listeners  map[UpdateListener]struct{}
 	lastUpdate time.Time
 	conn       *websocket.Conn
@@ -248,36 +246,9 @@ func (wsl *WSListener) writeStateFile() {
 	if wsl.stateFile == "" || wsl.lastUpdate.IsZero() {
 		return
 	}
-	dir := filepath.Dir(wsl.stateFile)
-	err := os.MkdirAll(dir, 0o777)
+	err := wsl.state.WriteStateFile(wsl.stateFile)
 	if err != nil {
-		log.Println("Error creating state directory", err)
-		return
-	}
-	f, err := ioutil.TempFile(filepath.Dir(wsl.stateFile), filepath.Base(wsl.stateFile))
-	if err != nil {
-		log.Println("Error creating tmp state file", err)
-		return
-	}
-	defer func() {
-		f.Close()
-		os.Remove(f.Name())
-	}()
-	enc := json.NewEncoder(f)
-	enc.SetIndent("", "  ")
-	err = enc.Encode(wsl.state)
-	if err != nil {
-		log.Println("Error writing to tmp state file", err)
-		return
-	}
-	err = f.Close()
-	if err != nil {
-		log.Println("Error closing tmp state file", err)
-		return
-	}
-	err = os.Rename(f.Name(), wsl.stateFile)
-	if err != nil {
-		log.Println("Error renaming tmp state file", err)
+		log.Println("Error writing state file", err)
 		return
 	}
 }
@@ -288,27 +259,21 @@ func (wsl *WSListener) readStateFile() {
 	if wsl.stateFile == "" {
 		return
 	}
-	f, err := os.Open(wsl.stateFile)
+	state, err := wsstate.ReadStateFile(wsl.stateFile)
 	if err != nil {
 		if !os.IsNotExist(err) {
 			log.Println("Error opening state file", err)
 		}
 		return
 	}
-	defer f.Close()
-	enc := json.NewDecoder(f)
-	err = enc.Decode(&wsl.state)
-	if err != nil {
-		log.Println("Error decoding state file", err)
-		return
-	}
 	// The keepFilter may have changed.
-	for k := range wsl.state {
+	for k := range state {
 		if !wsl.kf.Keep(k) {
-			delete(wsl.state, k)
+			delete(state, k)
 		}
 	}
-	fi, err := f.Stat()
+	wsl.state = state
+	fi, err := os.Stat(wsl.stateFile)
 	if err != nil {
 		log.Println("Error stating state file", err)
 		return
@@ -363,7 +328,7 @@ func (wsl *WSListener) RemoveListener(l UpdateListener) {
 	delete(wsl.listeners, l)
 }
 
-func (wsl *WSListener) Status() (time.Time, int, map[string]interface{}) {
+func (wsl *WSListener) Status() (time.Time, int, wsstate.State) {
 	wsl.mu.Lock()
 	defer wsl.mu.Unlock()
 	return wsl.lastUpdate, len(wsl.listeners), wsl.state

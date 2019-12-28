@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"io/ioutil"
 	"log"
@@ -22,6 +21,7 @@ import (
 
 	"github.com/DerbyStats/wsproxy/pkg/keyfilter"
 	"github.com/DerbyStats/wsproxy/pkg/namegen"
+	"github.com/DerbyStats/wsproxy/pkg/wsstate"
 	"github.com/DerbyStats/wsproxy/proxy"
 )
 
@@ -56,19 +56,11 @@ func NewWSMux(ctx context.Context, kf *keyfilter.KeyFilter, externalURL *url.URL
 		if err != nil {
 			continue
 		}
-		f, err := os.Open(fn)
+		state, err := wsstate.ReadStateFile(fn)
 		if err != nil {
 			continue
 		}
-		enc := json.NewDecoder(f)
-		var state map[string]interface{}
-		err = enc.Decode(&state)
-		if err != nil {
-			f.Close()
-			continue
-		}
-		f.Close()
-		li.CalculateSummary(state)
+		li.Summary = state.Summary()
 		if li.Summary != "" {
 			oldListeners[li.Name] = li
 		}
@@ -83,6 +75,13 @@ func NewWSMux(ctx context.Context, kf *keyfilter.KeyFilter, externalURL *url.URL
 	}
 }
 
+type ListenerInfo struct {
+	Name        string
+	LastUpdated time.Time
+	Clients     int
+	Summary     string
+}
+
 // Listeners returns information about all Listeners.
 func (m *WSMux) Listeners() []*ListenerInfo {
 	m.mu.Lock()
@@ -93,8 +92,8 @@ func (m *WSMux) Listeners() []*ListenerInfo {
 			Name:        name,
 			LastUpdated: lu,
 			Clients:     c,
+			Summary:     s.Summary(),
 		}
-		li.CalculateSummary(s)
 		res = append(res, li)
 	}
 	for _, ol := range m.oldListeners {
@@ -155,7 +154,7 @@ func (m *WSMux) gc() {
 			Name:        t.name,
 			LastUpdated: lu,
 		}
-		li.CalculateSummary(state)
+		li.Summary = state.Summary()
 		if li.Summary != "" {
 			// Don't save it if it was never pushed to.
 			m.oldListeners[t.name] = li
