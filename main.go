@@ -205,7 +205,12 @@ func main() {
 	listenAddr := cfg.Section("").Key("listen_address").String()
 	level.Info(logger).Log("msg", "Listening for HTTP", "addr", listenAddr)
 	httpSrv := &http.Server{Addr: listenAddr}
-	go httpSrv.ListenAndServe()
+	go func() {
+		if err := httpSrv.ListenAndServe(); err != http.ErrServerClosed {
+			level.Error(logger).Log("msg", "Error listening for HTTP", "err", err)
+			os.Exit(1)
+		}
+	}()
 
 	s := <-term
 	level.Info(logger).Log("msg", "Shutting down due to signal", "signal", s)
