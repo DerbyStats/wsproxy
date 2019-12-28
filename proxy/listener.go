@@ -12,9 +12,43 @@ import (
 
 	"github.com/gorilla/websocket"
 	"github.com/juju/persistent-cookiejar"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promauto"
 
 	"github.com/DerbyStats/wsproxy/pkg/keyfilter"
 	"github.com/DerbyStats/wsproxy/pkg/wsstate"
+)
+
+var (
+	startedLoops = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "ds_wsproxy_listener_connections_total",
+		Help: "Number of connections initiated.",
+	})
+	activeLoops = promauto.NewGauge(prometheus.GaugeOpts{
+		Name: "ds_wsproxy_listener_connections_active",
+		Help: "Number of active listener connections.",
+	})
+	receivedEntries = promauto.NewHistogram(prometheus.HistogramOpts{
+		Name:    "ds_wsproxy_listener_wsstate_entries",
+		Help:    "Number of entries in each state WS message we received, after filtering.",
+		Buckets: []float64{0, 5, 10, 50, 100, 500, 1000, 5000, 10000},
+	})
+	filteredEntries = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "ds_wsproxy_listener_wsstate_entries_filtered_total",
+		Help: "Number of entries WS state entries we filtered.",
+	})
+	stateFileWriteDuration = promauto.NewHistogram(prometheus.HistogramOpts{
+		Name: "ds_wsproxy_listener_statefile_write_duration_seconds",
+		Help: "How long attempts to write a statefile took.",
+	})
+	stateFileWritesFailed = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "ds_wsproxy_listener_statefile_writes_failed_total",
+		Help: "Numer of times a state file write failed.",
+	})
+	shutdownDuration = promauto.NewHistogram(prometheus.HistogramOpts{
+		Name: "ds_wsproxy_listener_shutdown_duration_seconds",
+		Help: "How long shutdowns have taken.",
+	})
 )
 
 type wsMessage struct {
@@ -60,7 +94,6 @@ func NewWSListener(ctx context.Context, kf *keyfilter.KeyFilter, stateFile strin
 		ctxCancel: cancel,
 		kf:        kf,
 		stateFile: stateFile,
-		state:     map[string]interface{}{},
 		listeners: map[UpdateListener]struct{}{},
 	}
 	wsl.readStateFile()
@@ -103,10 +136,13 @@ func (wsl *WSListener) Receive(w http.ResponseWriter, r *http.Request) {
 func (wsl *WSListener) clientLoop(c *websocket.Conn) error {
 	wsl.loopMu.Lock()
 	defer wsl.loopMu.Unlock()
+	activeLoops.Inc()
+	startedLoops.Inc()
 	wsl.mu.Lock()
 	wsl.conn = c
 	wsl.mu.Unlock()
 	defer func() {
+		activeLoops.Dec()
 		wsl.mu.Lock()
 		wsl.conn = nil
 		wsl.mu.Unlock()
@@ -184,12 +220,17 @@ func (wsl *WSListener) clientLoop(c *websocket.Conn) error {
 		wsl.mu.Lock()
 		wsl.lastUpdate = time.Now()
 		wsl.mu.Unlock()
+		origLen := len(msg.State)
 		// Ignore any extra information we may have been sent, such as WS.Client.
 		// Also ignore filtered information.
 		for k := range msg.State {
 			if !strings.HasPrefix(k, "ScoreBoard.") || !wsl.kf.Keep(k) {
 				delete(msg.State, k)
+				filteredEntries.Inc()
 			}
+		}
+		if origLen > 0 {
+			receivedEntries.Observe(float64(len(msg.State)))
 		}
 		if msg.Error != "" {
 			return fmt.Errorf("error from scoreboard: %s", msg.Error)
@@ -246,8 +287,11 @@ func (wsl *WSListener) writeStateFile() {
 	if wsl.stateFile == "" || wsl.lastUpdate.IsZero() {
 		return
 	}
+	timer := prometheus.NewTimer(stateFileWriteDuration)
 	err := wsl.state.WriteStateFile(wsl.stateFile)
+	timer.ObserveDuration()
 	if err != nil {
+		stateFileWritesFailed.Inc()
 		log.Println("Error writing state file", err)
 		return
 	}
@@ -283,6 +327,8 @@ func (wsl *WSListener) readStateFile() {
 
 // Shutdown the listener.
 func (wsl *WSListener) Shutdown() {
+	timer := prometheus.NewTimer(shutdownDuration)
+	defer timer.ObserveDuration()
 	wsl.ctxCancel()
 	wsl.mu.Lock()
 	if wsl.conn != nil {

@@ -74,7 +74,7 @@ func (s State) WriteStateFile(path string) error {
 	if err != nil {
 		return err
 	}
-	f, err := ioutil.TempFile(dir, path)
+	f, err := ioutil.TempFile(dir, filepath.Base(path))
 	if err != nil {
 		return err
 	}

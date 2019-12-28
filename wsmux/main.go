@@ -17,12 +17,38 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/gorilla/mux"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promauto"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"gopkg.in/ini.v1"
 
 	"github.com/DerbyStats/wsproxy/pkg/keyfilter"
 	"github.com/DerbyStats/wsproxy/pkg/namegen"
 	"github.com/DerbyStats/wsproxy/pkg/wsstate"
 	"github.com/DerbyStats/wsproxy/proxy"
+)
+
+var (
+	nameCollisions = promauto.NewSummary(prometheus.SummaryOpts{
+		Name: "ds_wsmux_namegen_collisions",
+		Help: "Number of collisions encountered when generating a name.",
+	})
+	invalidCookies = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "ds_wsmux_session_cookies_invalid_total",
+		Help: "Number of invalid cookies presented.",
+	})
+	newListenerDuration = promauto.NewHistogram(prometheus.HistogramOpts{
+		Name: "ds_wsmux_new_listener_duration_seconds",
+		Help: "Time to create new listeners.",
+	})
+	httpDuration = promauto.NewHistogramVec(prometheus.HistogramOpts{
+		Name: "ds_wsmux_http_duration_seconds",
+		Help: "Duration of non-WS HTTP requests.",
+	}, []string{"host", "path"})
+	httpBytes = promauto.NewSummaryVec(prometheus.SummaryOpts{
+		Name: "ds_wsmux_http_response_bytes",
+		Help: "Bytes sent in non-WS HTTP responses.",
+	}, []string{"host", "path"})
 )
 
 const (
@@ -170,19 +196,23 @@ func readCookie(r *http.Request) (string, string) {
 	}
 	parts := strings.Split(cookie.Value, ":")
 	if len(parts) != 2 {
+		invalidCookies.Inc()
 		return "", ""
 	}
 	name := parts[0]
 	secret := parts[1]
 	// Untrusted user input, check for directory transversal.
 	if filepath.Base(name) != name || name == "" {
+		invalidCookies.Inc()
 		return "", ""
 	}
 	content, err := ioutil.ReadFile(filepath.Join("data", name, cookieFileName))
 	if err != nil {
+		invalidCookies.Inc()
 		return "", ""
 	}
 	if string(content) != secret {
+		invalidCookies.Inc()
 		return "", ""
 	}
 	// Everything checks out, this is a valid cookie.
@@ -198,9 +228,11 @@ func generateName() string {
 	for i := 0; i < 10; i++ {
 		name := namegen.Generate()
 		if !exists(name) {
+			nameCollisions.Observe(float64(i))
 			return name
 		}
 	}
+	nameCollisions.Observe(10)
 	// Fallback to a UUID.
 	return uuid.New().String()
 }
@@ -281,10 +313,54 @@ func (m *WSMux) getListener(name string) *proxy.WSListener {
 		return l
 	}
 	// This does IO, should we move it away from the lock?
+	timer := prometheus.NewTimer(newListenerDuration)
 	l := proxy.NewWSListener(m.ctx, m.kf, filepath.Join("data", name, "state.json"))
+	timer.ObserveDuration()
 	m.listeners[name] = l
 	delete(m.oldListeners, name)
 	return l
+}
+
+// Collect implements prometheus.Collector
+func (m *WSMux) Collect(ch chan<- prometheus.Metric) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	ch <- prometheus.MustNewConstMetric(
+		prometheus.NewDesc("ds_wsmux_listeners_active",
+			"Number of active listeners.", nil, nil),
+		prometheus.GaugeValue, float64(len(m.listeners)))
+	ch <- prometheus.MustNewConstMetric(
+		prometheus.NewDesc("ds_wsmux_listeners_old",
+			"Number of old non-empty listeners, which are only on disk.", nil, nil),
+		prometheus.GaugeValue, float64(len(m.oldListeners)))
+}
+
+// Describe implements prometheus.Collector
+func (m *WSMux) Describe(ch chan<- *prometheus.Desc) {
+	prometheus.DescribeByCollect(m, ch)
+}
+
+// prometheusMiddleware implements mux.MiddlewareFunc.
+func prometheusMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		route := mux.CurrentRoute(r)
+		host, _ := route.GetHostTemplate()
+		path, _ := route.GetPathTemplate()
+		host = strings.Split(host, ".")[0] // Only need the subdomain.
+		var timer *prometheus.Timer
+		switch path {
+		case "/WS", "/WS/", "/receiver":
+			// Ignore WS paths.
+		default:
+			timer = prometheus.NewTimer(httpDuration.WithLabelValues(host, path))
+			next = promhttp.InstrumentHandlerResponseSize(
+				httpBytes.MustCurryWith(prometheus.Labels{"host": host, "path": path}), next)
+		}
+		next.ServeHTTP(w, r)
+		if timer != nil {
+			timer.ObserveDuration()
+		}
+	})
 }
 
 func main() {
@@ -310,8 +386,11 @@ func main() {
 
 	wsMux := NewWSMux(context.TODO(), keyFilter, externalURL)
 	go wsMux.Run()
+	prometheus.MustRegister(wsMux)
 
 	r := mux.NewRouter()
+	r.Use(prometheusMiddleware)
+	r.Handle("/metrics", promhttp.Handler())
 
 	r.HandleFunc("/receiver", wsMux.Receive)
 	// Serve up WS.

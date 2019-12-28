@@ -13,6 +13,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/victorspringer/http-cache"
 	"github.com/victorspringer/http-cache/adapter/memory"
 	"gopkg.in/ini.v1"
@@ -180,6 +181,8 @@ func main() {
 		log.Println("Pushing to", pushURL, "configured.")
 		go pushLoop(pushURL+"/receiver", wsl, wsd)
 	}
+
+	http.Handle("/metrics", promhttp.Handler())
 
 	term := make(chan os.Signal, 1)
 	signal.Notify(term, os.Interrupt, syscall.SIGTERM, syscall.SIGINT)

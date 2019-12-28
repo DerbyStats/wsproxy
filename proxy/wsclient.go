@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"encoding/json"
 	"errors"
 	"log"
 	"net/http"
@@ -8,8 +9,42 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promauto"
 
 	"github.com/DerbyStats/wsproxy/pkg/pathtrie"
+)
+
+var (
+	startedClients = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "ds_wsproxy_client_connections_total",
+		Help: "Number of connections handled.",
+	})
+	activeClients = promauto.NewGauge(prometheus.GaugeOpts{
+		Name: "ds_wsproxy_client_connections_active",
+		Help: "Number of active client connections.",
+	})
+	registerPaths = promauto.NewSummary(prometheus.SummaryOpts{
+		Name: "ds_wsproxy_client_register_paths",
+		Help: "Number of paths in register commands.",
+	})
+	pingCmds = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "ds_wsproxy_client_pings_total",
+		Help: "Number of pings received.",
+	})
+	queueFull = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "ds_wsproxy_client_update_queue_full_total",
+		Help: "How often the update queue was too full to take more updates.",
+	})
+	sentEntries = promauto.NewHistogram(prometheus.HistogramOpts{
+		Name:    "ds_wsproxy_client_wsstate_entries",
+		Help:    "Number of entries in each state WS message we sent.",
+		Buckets: []float64{0, 5, 10, 50, 100, 500, 1000, 5000, 10000},
+	})
+	clientSentBytes = promauto.NewSummary(prometheus.SummaryOpts{
+		Name: "ds_wsproxy_client_sent_bytes",
+		Help: "Bytes of JSON messages sent to clients. This excludes WS framing.",
+	})
 )
 
 // wsHandler handles an inbound HTTP WS connection.
@@ -36,9 +71,12 @@ func WSHandle(c *websocket.Conn, wsl *WSListener) {
 		done:           make(chan struct{}),
 		pt:             pathtrie.PathTrie{},
 	}
+	startedClients.Inc()
+	activeClients.Inc()
 	wsl.AddListener(pc)
 	pc.Handle()
 	wsl.RemoveListener(pc)
+	activeClients.Dec()
 }
 
 // proxyClient is a WS client connecting to us, looking for WS updates.
@@ -75,11 +113,13 @@ func (pc *proxyClient) readLoop() {
 		}
 		switch cmd.Action {
 		case "Ping":
+			pingCmds.Inc()
 			select {
 			case pc.pong <- struct{}{}:
 			default:
 			}
 		case "Register":
+			registerPaths.Observe(float64(len(cmd.Paths)))
 			pc.mu.Lock()
 			// Send on paths just registered, and update trie for future ones.
 			added := pathtrie.PathTrie{}
@@ -98,6 +138,7 @@ func (pc *proxyClient) readLoop() {
 			case pc.pendingUpdates <- addedState:
 			default:
 				// We cannot block here, as it'd stop updates for all clients.
+				queueFull.Inc()
 				pc.err(errors.New("update queue for client is full"))
 			}
 
@@ -128,6 +169,7 @@ func (pc *proxyClient) sendLoop() {
 			}
 			pc.mu.Unlock()
 			if len(filteredUpdate) > 0 {
+				sentEntries.Observe(float64(len(filteredUpdate)))
 				pc.send(&wsMessage{State: filteredUpdate})
 			}
 		}
@@ -136,7 +178,13 @@ func (pc *proxyClient) sendLoop() {
 
 func (pc *proxyClient) send(msg *wsMessage) {
 	pc.c.SetWriteDeadline(time.Now().Add(time.Second * 30))
-	err := pc.c.WriteJSON(&msg)
+	b, err := json.Marshal(msg)
+	if err != nil {
+		pc.err(err)
+		return
+	}
+	clientSentBytes.Observe(float64(len(b)))
+	err = pc.c.WriteMessage(websocket.TextMessage, b)
 	if err != nil {
 		pc.err(err)
 	}
@@ -158,6 +206,7 @@ func (pc *proxyClient) Update(update, full map[string]interface{}) {
 		pc.mu.Unlock()
 	default:
 		// We cannot block here, as it'd stop updates for all clients.
+		queueFull.Inc()
 		pc.err(errors.New("update queue for client is full"))
 	}
 }
