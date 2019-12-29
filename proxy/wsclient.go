@@ -57,7 +57,7 @@ func WSHTTPHandler(w http.ResponseWriter, r *http.Request, wsl *WSListener, logg
 		level.Error(logger).Log("msg", "Error upgrading websocket connection", "err", err)
 	}
 	err = WSHandle(c, wsl, logger)
-	level.Error(logger).Log("msg", "Error handling websocket connection", "err", err)
+	level.Debug(logger).Log("msg", "Error handling websocket connection", "err", err)
 }
 
 // wsHandler handles an inbound WS connection.
