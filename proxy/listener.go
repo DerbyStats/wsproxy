@@ -247,6 +247,9 @@ func (wsl *WSListener) clientLoop(c *websocket.Conn) error {
 						delete(newState, k)
 					} else {
 						newState[k] = v
+						if cv, ok := wsl.state[k]; ok && wsstate.ValuesEqual(v, cv) {
+							delete(msg.State, k) // Nothing changed.
+						}
 					}
 				}
 				// This is the first proper update from this connection, so have to clear out any

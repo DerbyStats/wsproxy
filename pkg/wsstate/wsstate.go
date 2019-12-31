@@ -109,3 +109,20 @@ func ReadStateFile(path string) (State, error) {
 	}
 	return s, nil
 }
+
+// ValuesEqual returns if the two values are equal. Can have false negatives.
+func ValuesEqual(a, b interface{}) bool {
+	switch v := a.(type) {
+	case string:
+		w, ok := b.(string)
+		return ok && w == v
+	case float64:
+		w, ok := b.(float64)
+		return ok && w == v // An exact float match is okay here.
+	case bool:
+		w, ok := b.(bool)
+		return ok && w == v
+	default:
+		return false
+	}
+}
