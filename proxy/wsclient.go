@@ -55,6 +55,7 @@ func WSHTTPHandler(w http.ResponseWriter, r *http.Request, wsl *WSListener, logg
 	c, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
 		level.Error(logger).Log("msg", "Error upgrading websocket connection", "err", err)
+		return
 	}
 	err = WSHandle(c, wsl, logger)
 	level.Debug(logger).Log("msg", "Error handling websocket connection", "err", err)
