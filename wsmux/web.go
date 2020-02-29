@@ -42,6 +42,7 @@ func homepage(w http.ResponseWriter, r *http.Request, wsMux *WSMux, externalURL 
 	})
 
 	fmt.Fprintf(w, "%s", `
+  <!DOCTYPE html>
   <html>
   <head>
   <title>Live Derby Stats</title>
@@ -52,6 +53,19 @@ func homepage(w http.ResponseWriter, r *http.Request, wsMux *WSMux, externalURL 
     margin: 0;
     font-family: sans-serif;
   }
+  table {
+    margin: 2ex 0;
+  }
+  table, th, td {
+    border: 1px solid #aaaaaa;
+    border-collapse: collapse;
+  }
+  td, th {
+    padding: .5ex;
+  }
+  tbody tr:hover {
+    background-color: #506d37;
+  }
 
   .heading {
     font-family: serif;
@@ -60,6 +74,7 @@ func homepage(w http.ResponseWriter, r *http.Request, wsMux *WSMux, externalURL 
     background-color: #3e4444;
   }
   h1 {
+    margin-top: 0;
     margin-bottom: 0;
     font-size: 300%;
   }
@@ -97,15 +112,18 @@ func homepage(w http.ResponseWriter, r *http.Request, wsMux *WSMux, externalURL 
   `)
 	if len(active) > 0 {
 		fmt.Fprintf(w, `
-    <table border=1 cellpadding="3em" cellspacing="0">
+    <table>
+    <thead>
     <tr><th>Name</th><th>Viewers</th><th>Summary</th><th>Age</th>
+    </thead>
+    <tbody>
     `)
 		for _, l := range active {
 			u := *externalURL
 			u.Host = l.Name + "." + u.Host
 			fmt.Fprintf(w, `
       <tr>
-      <td><a href="%s">%s</td>
+      <td><a href="%s/views/standard/">%s</td>
       <td style="text-align: center;">%d</td>
       <td>%s</td>
       <td style="text-align: right;">%s</td>
@@ -115,11 +133,11 @@ func homepage(w http.ResponseWriter, r *http.Request, wsMux *WSMux, externalURL 
 				html.EscapeString(l.Summary),
 				now.Sub(l.LastUpdated).Round(time.Second*10).String())
 		}
-		fmt.Fprintf(w, `</table>`)
+		fmt.Fprintf(w, `</tbody></table>`)
 		fmt.Fprintf(w, `
     `)
 	} else {
-		fmt.Fprintf(w, `<p>There are currently no active scoreboards.</p>`)
+		fmt.Fprintf(w, `<div>There are currently no active scoreboards.</div>`)
 	}
 	fmt.Fprintf(w,
 		`<p>To appear here, ensure the scoreboard computer can access the internet, <a
@@ -129,9 +147,10 @@ func homepage(w http.ResponseWriter, r *http.Request, wsMux *WSMux, externalURL 
 
 	if len(inactive) != 0 {
 		fmt.Fprintf(w, `
-    <p>You can also view inactive scoreboards that have not recently sent updates:<p>
-    <table border=1 cellpadding="3em" cellspacing="0">
-    <tr><th>Name</th><th>Summary</th><th>Age</th>`)
+    <p>You can also view inactive scoreboards that have not recently sent updates:</p>
+    <table>
+    <thead><tr><th>Name</th><th>Summary</th><th>Age</th></thead>
+    <tbody>`)
 		for _, l := range inactive {
 			u := *externalURL
 			u.Host = l.Name + "." + u.Host
@@ -146,10 +165,10 @@ func homepage(w http.ResponseWriter, r *http.Request, wsMux *WSMux, externalURL 
 				html.EscapeString(l.Summary),
 				strings.TrimSuffix(age, "0s"))
 		}
+		fmt.Fprintf(w, ` </tbody></table>`)
 	}
 
 	fmt.Fprintf(w, `
-  </table>
   <div class="footer"><a href="https://github.com/DerbyStats/wsproxy">Source Code</a></div>
   </div>
   </body>
