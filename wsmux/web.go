@@ -169,7 +169,7 @@ func homepage(w http.ResponseWriter, r *http.Request, wsMux *WSMux, externalURL 
 	}
 
 	fmt.Fprintf(w, `
-  <div class="footer"><a href="https://github.com/DerbyStats/wsproxy">Source Code</a></div>
+  <div class="footer"><a href="https://www.derbystats.eu">Rankings</a> | <a href="https://github.com/DerbyStats/wsproxy">Source Code</a></div>
   </div>
   </body>
   </html>`)

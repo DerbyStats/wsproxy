@@ -414,13 +414,13 @@ func main() {
 	r.Host("{subdomain}." + externalURL.Host).Path("/WS/").HandlerFunc(wsMux.WSHandler)
 
 	// Homepage.
-	r.Host("www." + externalURL.Host).Path("/").HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	r.Host("live." + externalURL.Host).Path("/").HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		homepage(w, r, wsMux, externalURL)
 	})
-	// Redirect bare domain to www,
+	// Redirect bare domain to live,
 	r.Host(externalURL.Host).HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		u := *externalURL
-		u.Host = "www." + u.Host
+		u.Host = "live." + u.Host
 		http.Redirect(w, r, u.String(), http.StatusMovedPermanently)
 	})
 
