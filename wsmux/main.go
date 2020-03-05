@@ -433,6 +433,7 @@ func main() {
 	r.Host("{subdomain}." + externalURL.Host).HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if htmlDir != "" {
 			w.Header().Set("Cache-Control", "no-cache")
+			w.Header().Set("X-Robots-Tag", "none")
 			fs.ServeHTTP(w, r)
 		} else {
 			fmt.Fprintf(w, "No subdomain_html_directory provided.")

@@ -157,7 +157,7 @@ func homepage(w http.ResponseWriter, r *http.Request, wsMux *WSMux, externalURL 
 			age := now.Sub(l.LastUpdated).Round(time.Minute).String()
 			fmt.Fprintf(w, `
       <tr>
-      <td><a href="%s/views/standard/">%s</td>
+      <td><a href="%s/views/standard/" rel="nofollow">%s</td>
       <td>%s</td>
       <td style="text-align: right;">%s</td>
       </tr>`,
