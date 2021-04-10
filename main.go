@@ -88,14 +88,14 @@ func pushLoop(url string, wsl *proxy.WSListener, d *proxy.WSDialer, logger log.L
 			time.Sleep(time.Second * 5)
 			continue
 		}
-		level.Info(logger).Log("msg", "Push connection made", "url", url)
+		level.Info(logger).Log("msg", "Push connection made")
 		display := r.Header.Get("Display-URL")
 		if display != "" {
 			level.Debug(logger).Log("msg", "Got display URL from push connection", "url", display)
 			// Make it really obvious.
 			fmt.Printf("\n\nDisplay URL: %s\n\n\n", display)
 		}
-		err = proxy.WSHandle(c, wsl, log.With(logger, "pushURL", url))
+		err = proxy.WSHandle(c, wsl, logger)
 		level.Info(logger).Log("msg", "Push connection closed", "err", err)
 	}
 }
@@ -188,14 +188,16 @@ func main() {
 	http.HandleFunc("/WS/", func(w http.ResponseWriter, r *http.Request) { proxy.WSHTTPHandler(w, r, wsl, logger) })
 
 	// Pushing to another proxy.
-	pushURL := cfg.Section("").Key("push_address").String()
-	if pushURL != "" {
+  for _, pushURL := range cfg.Section("").Key("push_address").ValueWithShadows() {
+    if pushURL == "" {
+      continue
+    }
 		if !strings.HasPrefix(pushURL, "wss://") && !strings.HasPrefix(pushURL, "ws://") {
 			pushURL = "ws://" + pushURL
 		}
-		level.Info(logger).Log("msg", "Pushing configured", "url", pushURL)
-		go pushLoop(pushURL+"/receiver", wsl, wsd, logger)
-	}
+		level.Info(logger).Log("msg", "Pushing configured", "pushURL", pushURL)
+		go pushLoop(pushURL+"/receiver", wsl, wsd, log.With(logger, "pushURL", pushURL))
+  }
 
 	http.Handle("/metrics", promhttp.Handler())
 
